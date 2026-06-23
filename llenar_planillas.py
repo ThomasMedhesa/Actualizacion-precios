@@ -135,11 +135,12 @@ def detectar_formato(ws):
 # LECTURA DE OFERTAS
 # ---------------------------------------------------------------------------
 
-def leer_ofertas(fnames=None, filename_to_com=None):
+def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
     """
     Lee los archivos en Ofertas/ que tengan formato estandar.
     Si `fnames` se especifica, solo procesa esos archivos.
     `filename_to_com`: dict {nombre_archivo: comercializadora_override}
+    `ofertas_dir`: directorio donde buscar archivos de oferta (default: OFERTAS_DIR)
     Retorna (clientes_mp, clientes_mt):
       {cliente_norm: {
           '_nombre': str,
@@ -147,11 +148,13 @@ def leer_ofertas(fnames=None, filename_to_com=None):
           '_comercializadoras': {comercializadora: {tarifa: {'P1'..'P6','FEE','Coste'}}}
       }}
     """
+    if ofertas_dir is None:
+        ofertas_dir = OFERTAS_DIR
     # Acumuladores globales (cruce de archivos)
     todos_clientes = {}       # cliente_norm -> {_nombre, _codigos: set}
     todos_precios = defaultdict(list)  # (cliente_norm, comercializadora, tarifa) -> lista de dicts
 
-    for fname in sorted(os.listdir(OFERTAS_DIR)):
+    for fname in sorted(os.listdir(ofertas_dir)):
         if not fname.endswith('.xlsx'):
             continue
         if fnames is not None and fname not in fnames:
@@ -161,7 +164,7 @@ def leer_ofertas(fnames=None, filename_to_com=None):
             comercializadora = filename_to_com[fname].strip().upper()
         else:
             comercializadora = extract_comercializadora(fname)
-        filepath = os.path.join(OFERTAS_DIR, fname)
+        filepath = os.path.join(ofertas_dir, fname)
         print(f"\nProcesando: {fname} -> Comercializadora: {comercializadora}")
 
         try:
@@ -296,6 +299,21 @@ def leer_ofertas(fnames=None, filename_to_com=None):
 # CREACION DE PLANTILLAS
 # ---------------------------------------------------------------------------
 
+def auto_ajustar_columnas(ws):
+    """Ajusta el ancho de las columnas al contenido."""
+    from openpyxl.utils import get_column_letter
+    for col_cells in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for cell in col_cells:
+            val = str(cell.value) if cell.value is not None else ''
+            length = sum(2 if ord(c) > 127 else 1 for c in val)
+            if length > max_len:
+                max_len = length
+        adjusted = min(max_len + 2, 45)
+        ws.column_dimensions[col_letter].width = max(adjusted, 8)
+
+
 def crear_libro_plantilla(headers):
     """Crea un Workbook nuevo con hoja 'Plantilla' y fila de encabezados."""
     wb = Workbook()
@@ -331,11 +349,29 @@ def _escribir_datos_com(ws, row_idx, cols, com, fechas_com):
     ws.cell(row=row_idx, column=cols['Renovable']).value = renovable
 
 
+def _valor_cliente(cliente):
+    if cliente is None:
+        return None
+    try:
+        return int(cliente)
+    except (ValueError, TypeError):
+        return cliente
+
+
+def _tiene_fijos(datos):
+    return any(datos.get(k, 0) for k in ('P1', 'P2', 'P3', 'P4', 'P5', 'P6'))
+
+
+def _tiene_indexados(datos):
+    return datos.get('FEE', 0) + datos.get('Coste', 0) > 0
+
+
 def escribir_fila_fija(ws, row_idx, cols, datos, cliente=None, tarifa=None,
                        fechas_com=None):
     """Escribe una fila de precio fijo (Indexado=No)."""
-    if cliente is not None:
-        ws.cell(row=row_idx, column=cols['Cliente']).value = cliente
+    c = _valor_cliente(cliente)
+    if c is not None:
+        ws.cell(row=row_idx, column=cols['Cliente']).value = c
     ws.cell(row=row_idx, column=cols['COMERCIALIZADORA']).value = datos['com']
     _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com)
     ws.cell(row=row_idx, column=cols['P1']).value = datos['P1']
@@ -355,8 +391,9 @@ def escribir_fila_indexada(ws, row_idx, cols, datos, cliente=None, tarifa=None,
                            fechas_com=None):
     """Escribe una fila indexada (Indexado=Si)."""
     indice_val = round(datos['FEE'] + datos['Coste'], 4)
-    if cliente is not None:
-        ws.cell(row=row_idx, column=cols['Cliente']).value = cliente
+    c = _valor_cliente(cliente)
+    if c is not None:
+        ws.cell(row=row_idx, column=cols['Cliente']).value = c
     ws.cell(row=row_idx, column=cols['COMERCIALIZADORA']).value = datos['com']
     _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com)
     ws.cell(row=row_idx, column=cols['P1']).value = 0
@@ -387,10 +424,12 @@ def crear_plantilla_monopunto(cliente_info, fechas_com=None):
         datos = tarifas[tarifa]
 
         datos_con_com = dict(datos, com=com)
-        escribir_fila_fija(ws, row_idx, MP, datos_con_com, fechas_com=fechas_com)
-        row_idx += 1
-        escribir_fila_indexada(ws, row_idx, MP, datos_con_com, fechas_com=fechas_com)
-        row_idx += 1
+        if _tiene_fijos(datos):
+            escribir_fila_fija(ws, row_idx, MP, datos_con_com, fechas_com=fechas_com)
+            row_idx += 1
+        if _tiene_indexados(datos):
+            escribir_fila_indexada(ws, row_idx, MP, datos_con_com, fechas_com=fechas_com)
+            row_idx += 1
 
     return wb
 
@@ -412,14 +451,16 @@ def crear_plantilla_multipunto(cliente_info, fechas_com=None):
             datos = tarifas[tarifa]
             datos_con_com = dict(datos, com=com)
 
-            escribir_fila_fija(ws, row_idx, MT, datos_con_com,
-                               cliente=codigo_principal, tarifa=tarifa,
-                               fechas_com=fechas_com)
-            row_idx += 1
-            escribir_fila_indexada(ws, row_idx, MT, datos_con_com,
+            if _tiene_fijos(datos):
+                escribir_fila_fija(ws, row_idx, MT, datos_con_com,
                                    cliente=codigo_principal, tarifa=tarifa,
                                    fechas_com=fechas_com)
-            row_idx += 1
+                row_idx += 1
+            if _tiene_indexados(datos):
+                escribir_fila_indexada(ws, row_idx, MT, datos_con_com,
+                                       cliente=codigo_principal, tarifa=tarifa,
+                                       fechas_com=fechas_com)
+                row_idx += 1
 
     return wb
 
@@ -493,6 +534,7 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
                 wb = crear_plantilla_multipunto(cliente_info, fechas_com)
             ws = wb['Plantilla']
 
+        auto_ajustar_columnas(ws)
         wb.save(output_path)
         print(f"    Guardado: {os.path.basename(output_path)}")
     except PermissionError:
@@ -559,7 +601,7 @@ def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto
                                    cliente=codigo_principal if not es_monopunto else None,
                                    tarifa=tarifa if not es_monopunto else None,
                                    fechas_com=fechas_com)
-            else:
+            elif _tiene_fijos(datos):
                 combinaciones_a_agregar.append((com, tarifa, 'NO'))
 
             key_si = (com, tarifa_key, 'SI', ren)
@@ -569,7 +611,7 @@ def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto
                                        cliente=codigo_principal if not es_monopunto else None,
                                        tarifa=tarifa if not es_monopunto else None,
                                        fechas_com=fechas_com)
-            else:
+            elif _tiene_indexados(datos):
                 combinaciones_a_agregar.append((com, tarifa, 'SI'))
 
     # Agregar combinaciones faltantes al final
