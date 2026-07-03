@@ -8,7 +8,7 @@ Uso: python procesar_ofertas.py
 import os
 import sys
 import threading
-from datetime import date, datetime
+from datetime import date, datetime 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -258,18 +258,18 @@ class OfertasView(ttk.Frame):
             cbo_ren.set('No')
             cbo_ren.grid(row=row, column=3, padx=4, pady=2)
 
-            e_rec = DateEntry(self.frame_ofertas, date_pattern='yyyy-mm-dd',
+            e_rec = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
                               width=12, background='#005fb8',
                               foreground='white', borderwidth=2)
             e_rec.set_date(date.today())
             e_rec.grid(row=row, column=4, padx=4, pady=2)
 
-            e_ven = DateEntry(self.frame_ofertas, date_pattern='yyyy-mm-dd',
+            e_ven = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
                               width=12, background='#005fb8',
                               foreground='white', borderwidth=2)
             e_ven.grid(row=row, column=5, padx=4, pady=2)
 
-            e_val = DateEntry(self.frame_ofertas, date_pattern='yyyy-mm-dd',
+            e_val = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
                               width=12, background='#005fb8',
                               foreground='white', borderwidth=2)
             e_val.grid(row=row, column=6, padx=4, pady=2)

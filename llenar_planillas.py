@@ -115,16 +115,18 @@ def extraer_codigo_principal(codigos):
 
 def detectar_formato(ws):
     """Verifica si la hoja tiene formato estandar (columnas Z-AE con precios).
-    Escanea hasta 200 filas para detectar archivos con datos mas abajo."""
+    Escanea hasta 200 filas para detectar archivos con datos mas abajo.
+    Acepta archivos con al menos 1 precio valido en cualquier columna (P1-P6 o FEE/Coste)."""
     max_row_check = min(ws.max_row, 200)
     found_prices = 0
-    for row in ws.iter_rows(min_row=8, max_row=max_row_check, min_col=OF_P1, max_col=OF_P1):
+    for row in ws.iter_rows(min_row=8, max_row=max_row_check, min_col=OF_P1, max_col=OF_COSTE):
         for cell in row:
             if cell.value is not None:
                 try:
-                    if float(cell.value) > 0:
+                    val = float(cell.value)
+                    if val > 0:
                         found_prices += 1
-                        if found_prices >= 3:
+                        if found_prices >= 1:
                             return True
                 except (ValueError, TypeError):
                     pass
@@ -183,6 +185,7 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
             print(f"  Formato no reconocido (sin precios en col Z-AE), saltando")
             continue
 
+        print(f"  Formato detectado correctamente")
         # PASE 1: agrupar filas por Codigo
         rows_by_codigo = defaultdict(list)
         current_cliente = None
@@ -344,8 +347,13 @@ def _escribir_datos_com(ws, row_idx, cols, com, fechas_com):
         return
     recibida, vencimiento, validez, renovable = datos
     ws.cell(row=row_idx, column=cols['Recibida']).value = recibida
+    ws.cell(row=row_idx, column=cols['Recibida']).number_format = 'DD/MM/YYYY'
     ws.cell(row=row_idx, column=cols['Vencimiento']).value = vencimiento
+    if vencimiento is not None:
+        ws.cell(row=row_idx, column=cols['Vencimiento']).number_format = 'DD/MM/YYYY'
     ws.cell(row=row_idx, column=cols['Validez']).value = validez
+    if validez is not None:
+        ws.cell(row=row_idx, column=cols['Validez']).number_format = 'DD/MM/YYYY'
     ws.cell(row=row_idx, column=cols['Renovable']).value = renovable
 
 
