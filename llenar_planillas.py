@@ -144,7 +144,7 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
     `filename_to_com`: dict {nombre_archivo: comercializadora_override}
     `ofertas_dir`: directorio donde buscar archivos de oferta (default: OFERTAS_DIR)
     Retorna (clientes_mp, clientes_mt):
-      {cliente_norm: {
+      {eff_key: {
           '_nombre': str,
           '_codigos': [str],
           '_comercializadoras': {comercializadora: {tarifa: {'P1'..'P6','FEE','Coste'}}}
@@ -246,14 +246,26 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
 
             # Acumular info del cliente
             cliente_norm = normalize(cliente)
-            if cliente_norm not in todos_clientes:
-                todos_clientes[cliente_norm] = {
+            nuevos_codigos = codigos_por_cliente.get(cliente, {codigo})
+
+            if cliente_norm in todos_clientes:
+                codigos_existentes = todos_clientes[cliente_norm]['_codigos']
+                if codigos_existentes & nuevos_codigos:
+                    eff_key = cliente_norm
+                else:
+                    first_code = str(sorted(nuevos_codigos)[0])
+                    eff_key = f"{cliente_norm}_{first_code}"
+            else:
+                eff_key = cliente_norm
+
+            if eff_key not in todos_clientes:
+                todos_clientes[eff_key] = {
                     '_nombre': cliente,
                     '_codigos': set(),
                 }
-            todos_clientes[cliente_norm]['_codigos'].update(codigos_por_cliente.get(cliente, {codigo}))
+            todos_clientes[eff_key]['_codigos'].update(nuevos_codigos)
 
-            key = (cliente_norm, comercializadora, tarifa)
+            key = (eff_key, comercializadora, tarifa)
             todos_precios[key].append({
                 'P1': p1, 'P2': p2, 'P3': p3, 'P4': p4, 'P5': p5, 'P6': p6,
                 'FEE': fee, 'Coste': coste,
@@ -483,7 +495,8 @@ def obtener_nombre_archivo_mp(cliente_info):
 def obtener_nombre_archivo_mt(cliente_info):
     """Genera el nombre de archivo para un cliente MULTIPUNTO."""
     nombre_limpio = limpiar_nombre_cliente(cliente_info['_nombre'])
-    return f"Datos Multipunto {nombre_limpio}.xlsx"
+    codigo = extraer_codigo_principal(cliente_info['_codigos'])
+    return f"{codigo} Datos Multipunto {nombre_limpio}.xlsx"
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +523,8 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
 
         # Extraer nombre de cliente del archivo
         basename = fname.replace('.xlsx', '')
+        code_match = re.match(r'^(\d+)\s+', basename)
+        file_code = code_match.group(1) if code_match else None
         basename = re.sub(r'^\d+\s+', '', basename)
         if es_monopunto:
             basename = re.sub(r'^Datos\s+Monopunto\s+', '', basename)
@@ -518,6 +533,14 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
         nombre_archivo = basename.strip()
 
         if name_matches(nombre_archivo, cliente_nombre):
+            if file_code:
+                our_codes = [str(c) for c in cliente_info['_codigos']]
+                code_ok = any(
+                    str(c).startswith(file_code) or file_code.startswith(str(c).split('/')[0])
+                    for c in our_codes
+                )
+                if not code_ok:
+                    continue
             archivo_existente = os.path.join(directorio, fname)
             break
 
