@@ -113,6 +113,13 @@ def extraer_codigo_principal(codigos):
     return match.group(1) if match else '000'
 
 
+def extraer_prefijo(codigo):
+    """Extrae el prefijo numerico de un codigo. Ej: '212/001' -> '212'."""
+    c = str(codigo).strip()
+    match = re.match(r'^(\d+)', c)
+    return match.group(1) if match else c
+
+
 def detectar_formato(ws):
     """Verifica si la hoja tiene formato estandar (columnas Z-AE con precios).
     Escanea hasta 200 filas para detectar archivos con datos mas abajo.
@@ -153,8 +160,8 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
     if ofertas_dir is None:
         ofertas_dir = OFERTAS_DIR
     # Acumuladores globales (cruce de archivos)
-    todos_clientes = {}       # cliente_norm -> {_nombre, _codigos: set}
-    todos_precios = defaultdict(list)  # (cliente_norm, comercializadora, tarifa) -> lista de dicts
+    todos_clientes = {}       # prefijo -> {_nombre, _codigos: set}
+    todos_precios = defaultdict(list)  # (prefijo, comercializadora, tarifa) -> lista de dicts
 
     for fname in sorted(os.listdir(ofertas_dir)):
         if not fname.endswith('.xlsx'):
@@ -244,28 +251,17 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
             if p1 == 0 and p2 == 0 and p3 == 0 and p4 == 0 and p5 == 0 and p6 == 0 and fee == 0 and coste == 0:
                 continue
 
-            # Acumular info del cliente
-            cliente_norm = normalize(cliente)
-            nuevos_codigos = codigos_por_cliente.get(cliente, {codigo})
+            # Acumular info del cliente - agrupar por PREFIJO del codigo
+            prefijo = extraer_prefijo(codigo)
 
-            if cliente_norm in todos_clientes:
-                codigos_existentes = todos_clientes[cliente_norm]['_codigos']
-                if codigos_existentes & nuevos_codigos:
-                    eff_key = cliente_norm
-                else:
-                    first_code = str(sorted(nuevos_codigos)[0])
-                    eff_key = f"{cliente_norm}_{first_code}"
-            else:
-                eff_key = cliente_norm
-
-            if eff_key not in todos_clientes:
-                todos_clientes[eff_key] = {
+            if prefijo not in todos_clientes:
+                todos_clientes[prefijo] = {
                     '_nombre': cliente,
                     '_codigos': set(),
                 }
-            todos_clientes[eff_key]['_codigos'].update(nuevos_codigos)
+            todos_clientes[prefijo]['_codigos'].add(codigo)
 
-            key = (eff_key, comercializadora, tarifa)
+            key = (prefijo, comercializadora, tarifa)
             todos_precios[key].append({
                 'P1': p1, 'P2': p2, 'P3': p3, 'P4': p4, 'P5': p5, 'P6': p6,
                 'FEE': fee, 'Coste': coste,
