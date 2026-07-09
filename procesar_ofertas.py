@@ -8,7 +8,7 @@ Uso: python procesar_ofertas.py
 import os
 import sys
 import threading
-from datetime import date, datetime 
+from datetime import date, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -25,10 +25,17 @@ except ImportError:
     os.system("pip install openpyxl")
     from openpyxl import load_workbook
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import llenar_planillas as proc
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def obtener_base_dir():
+    """Obtiene el directorio base, compatible con PyInstaller."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = obtener_base_dir()
+sys.path.insert(0, BASE_DIR)
+import llenar_planillas as proc
 OFERTAS_DEF = proc.OFERTAS_DIR
 SALIDA_DEF = BASE_DIR
 
@@ -348,7 +355,7 @@ class OfertasView(ttk.Frame):
 
     def _procesar_thread(self, fnames, fechas_com, filename_to_com,
                           ofertas_dir, salida_dir):
-        original_stdout = sys.stdout
+        original_stdout = sys.stdout if sys.stdout is not None else open(os.devnull, 'w')
         class Captura:
             def __init__(self, lista, original):
                 self.lista = lista

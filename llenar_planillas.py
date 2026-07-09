@@ -11,6 +11,7 @@ Formato de oferta esperado:
 """
 
 import os
+import sys
 import re
 from datetime import date
 from collections import defaultdict
@@ -22,7 +23,14 @@ except ImportError:
     os.system("pip install openpyxl")
     from openpyxl import load_workbook, Workbook
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def obtener_base_dir():
+    """Obtiene el directorio base, compatible con PyInstaller."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = obtener_base_dir()
 OFERTAS_DIR = os.path.join(BASE_DIR, "Ofertas")
 MONOPUNTO_DIR = os.path.join(BASE_DIR, "MONOPUNTO")
 MULTIPUNTO_DIR = os.path.join(BASE_DIR, "MULTIPUNTO")
