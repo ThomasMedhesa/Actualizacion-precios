@@ -178,14 +178,20 @@ def create_manual():
     # 3.1
     doc.add_heading('3.1 Iniciar la Herramienta', level=2)
     doc.add_paragraph(
-        'Ejecutar el archivo ActualizarPrecios.exe. Se abrirá una ventana con '
-        'la interfaz gráfica titulada "Gestor de Ofertas Eléctricas".'
+        'Ejecutar el archivo ActualizarPrecios.exe. Se abrirá una ventana con la interfaz '
+        'gráfica titulada "Gestor de Ofertas Eléctricas", organizada en cuatro bloques: '
+        'CARPETAS, OFERTAS, RESULTADO y una barra inferior de acción.'
+    )
+    doc.add_paragraph(
+        'En la esquina superior derecha está el interruptor de tema (Claro / Oscuro). '
+        'La preferencia se recuerda junto con las carpetas y el tamaño de la ventana '
+        'en el archivo config.json de la carpeta de la aplicación.'
     )
 
     # 3.2
     doc.add_heading('3.2 Seleccionar Directorios', level=2)
     doc.add_paragraph(
-        'En la parte superior de la ventana se encuentran los selectores de directorio:'
+        'En el bloque CARPETAS se encuentran los selectores de directorio:'
     )
 
     dir_items = [
@@ -202,12 +208,26 @@ def create_manual():
         run.bold = True
         p.add_run(desc)
 
+    doc.add_paragraph(
+        'Junto a los selectores, los botones "Abrir MONOPUNTO" y "Abrir MULTIPUNTO" '
+        'abren directamente esas carpetas de resultados en el explorador de archivos. '
+        'Si aún no existen, se crean vacías.'
+    )
+
     # 3.3
     doc.add_heading('3.3 Revisar la Tabla de Ofertas', level=2)
     doc.add_paragraph(
         'Al seleccionar el directorio de ofertas, la herramienta lista automáticamente '
         'todos los archivos .xlsx encontrados (ignora archivos temporales que empiezan con ~$). '
-        'Para cada archivo se muestran las siguientes columnas:'
+        'La tabla está agrupada por comercializadora: cada fila en negrita es una '
+        'comercializadora y debajo están sus archivos. Se puede hacer clic en la flecha '
+        'del grupo para plegarlo o desplegarlo.'
+    )
+    doc.add_paragraph(
+        'Sobre la tabla hay un cuadro de búsqueda. Escribir texto filtra al instante por '
+        'nombre de archivo o de comercializadora, y al limpiarlo vuelven a mostrarse todos '
+        'los grupos (que se despliegan automáticamente mientras haya un filtro activo). '
+        'Haciendo clic en la cabecera de una columna se alterna el orden ascendente/descendente.'
     )
 
     table2 = doc.add_table(rows=1, cols=3)
@@ -223,10 +243,12 @@ def create_manual():
                 run.font.size = Pt(9)
 
     cols = [
-        ('Checkbox', 'Seleccionar/deseleccionar la oferta para procesar.', 'Marcada (activa)'),
+        ('Casilla', 'Seleccionar/deseleccionar la oferta para procesar (también se '
+                    'marca o desmarca haciendo clic en la celda izquierda).', 'Marcada (activa)'),
         ('Archivo', 'Nombre del archivo de oferta.', '—'),
-        ('Comercializadora', 'Nombre de la comercializadora. Se auto-sugiere según el nombre del archivo.', 'Auto-detectada'),
-        ('Renovable', 'Si la oferta es renovable o no.', 'No'),
+        ('Comercializadora', 'Comercializadora del grupo al que pertenece el archivo. '
+                            'Se auto-detecta según el nombre.', 'Auto-detectada'),
+        ('Renovable', 'Si la oferta es renovable o no. Solo se edita en la fila del grupo.', 'No'),
         ('Recibida', 'Fecha en que se recibió la oferta.', 'Fecha de hoy'),
         ('Vencimiento', 'Fecha de vencimiento de la oferta.', 'Vacía'),
         ('Validez', 'Fecha de validez de la oferta.', 'Vacía'),
@@ -246,28 +268,38 @@ def create_manual():
     toolbar_items = [
         'Seleccionar todas: Marca todos los checkboxes.',
         'Deseleccionar todas: Desmarca todos los checkboxes.',
-        'Refrescar: Vuelve a leer la carpeta de ofertas y actualiza la tabla.',
+        'Refrescar: Vuelve a leer la carpeta de ofertas y actualiza la tabla sin perder '
+        'las fechas ni las comercializadoras ya asignadas.',
     ]
     for item in toolbar_items:
         p = doc.add_paragraph(style='List Bullet')
         p.add_run(item)
 
     # 3.4
-    doc.add_heading('3.4 Asignar Fechas y Comercializadora', level=2)
+    doc.add_heading('3.4 Editar Celdas, Fechas y Comercializadora', level=2)
     doc.add_paragraph(
-        'Antes de procesar, el usuario debe verificar y completar la información de cada oferta:'
+        'La edición se hace directamente sobre la tabla, haciendo un clic simple en la celda '
+        'correspondiente (doble clic o Intro sobre la fila seleccionada también abre el editor):'
     )
     items_34 = [
-        'Comercializadora: Verificar que la comercializadora auto-detectada sea correcta. '
-        'Se puede cambiar usando el desplegable con la lista de comercializadoras conocidas.',
-        'Renovable: Seleccionar "Si" o "No" según corresponda.',
-        'Fechas: Establecer las fechas de Recibida, Vencimiento y Validez usando los '
-        'selectores de fecha (calendario). La fecha de Recibida se establece por defecto '
-        'como la fecha de hoy.',
+        'Casilla (primera columna): alterna entre marcada y desmarcada.',
+        'Comercializadora (fila de un archivo): abre un desplegable con la lista de '
+        'comercializadoras conocidas. Al confirmar, el archivo se mueve al grupo de la '
+        'comercializadora elegida y se crea el grupo si es nueva.',
+        'Renovable (fila del grupo): abre un desplegable con los valores "No" y "Si".',
+        'Fechas Recibida, Vencimiento y Validez (fila del grupo): abren un calendario con '
+        'los botones Aceptar, Limpiar y Cancelar, además de la navegación entre meses. '
+        '"Aceptar" aplica el día marcado, "Limpiar" deja la fecha vacía y "Cancelar" '
+        'cierra el calendario sin cambiar nada.',
     ]
     for item in items_34:
         p = doc.add_paragraph(style='List Bullet')
         p.add_run(item)
+
+    doc.add_paragraph(
+        'Con el teclado: Intro o doble clic abre el editor de la celda enfocada, '
+        'las flechas recorren las celdas y Esc o un clic fuera cierra el editor sin cambios.'
+    )
 
     p_note = doc.add_paragraph()
     run = p_note.add_run('Importante: ')
@@ -278,15 +310,27 @@ def create_manual():
         'Si hay varias ofertas de la misma comercializadora, se aplicarán las mismas fechas a todas.'
     )
 
+    p_note = doc.add_paragraph()
+    run = p_note.add_run('Importante: ')
+    run.bold = True
+    run.font.color.rgb = RGBColor(180, 0, 0)
+    p_note.add_run(
+        'Una fecha vacía significa "no modificar": la herramienta deja intacta la celda de '
+        'esa fecha en las plantillas ya existentes. Si se quiere borrar la fecha de una '
+        'plantilla, hay que borrarla en Excel o dejar de usar la plantilla anterior.'
+    )
+
     # 3.5
     doc.add_heading('3.5 Procesar las Ofertas', level=2)
     doc.add_paragraph(
         'Una vez configuradas todas las ofertas, hacer clic en el botón azul '
-        '"Procesar ofertas seleccionadas" en la parte inferior de la ventana.'
+        '"Procesar" de la barra inferior. Mientras dura el proceso, ese mismo botón '
+        'pasa a ser "Cancelar" y la barra de progreso muestra el avance.'
     )
     doc.add_paragraph(
-        'La herramienta mostrará en tiempo real el progreso del procesamiento en el panel '
-        '"Estado" de la parte inferior. El procesamiento incluye:'
+        'El proceso se ejecuta en segundo plano, por lo que la ventana sigue respondiendo '
+        'y se puede cancelar en cualquier momento. Todo el detalle se muestra en el bloque '
+        'RESULTADO, con un código de color según el tipo de mensaje:'
     )
     steps_35 = [
         'Lectura y validación de cada archivo de oferta seleccionado.',
@@ -301,8 +345,9 @@ def create_manual():
         p.add_run(step)
 
     doc.add_paragraph(
-        'Al finalizar, se muestra un resumen con el número de ofertas procesadas, '
-        'clientes Monopunto y clientes Multipunto generados.'
+        'Al finalizar, el log muestra un resumen con el número de ofertas procesadas, '
+        'clientes Monopunto y clientes Multipunto generados. Para vaciar el log, '
+        'usar el botón "Limpiar log".'
     )
 
     # 3.6
@@ -321,8 +366,43 @@ def create_manual():
     doc.add_paragraph(
         'Cada plantilla contiene una hoja llamada "Plantilla" con los precios organizados '
         'por comercializadora, incluyendo información de fechas, precios por período (P1-P6), '
-        'y si es precio fijo o indexado.'
+        'y si es precio fijo o indexado. Para abrirlas, usar los botones "Abrir MONOPUNTO" '
+        'y "Abrir MULTIPUNTO" del bloque CARPETAS.'
     )
+
+    # 3.7
+    doc.add_heading('3.7 Atajos de Teclado', level=2)
+    shortcuts = [
+        ('Ctrl + O', 'Elegir la carpeta de ofertas.'),
+        ('Ctrl + S', 'Elegir la carpeta de salida.'),
+        ('Ctrl + R', 'Refrescar la lista de ofertas.'),
+        ('Ctrl + A', 'Seleccionar todas las ofertas.'),
+        ('Ctrl + D', 'Deseleccionar todas las ofertas.'),
+        ('Ctrl + L', 'Limpiar el log.'),
+        ('Intro', 'Procesar; sobre una celda abre su editor.'),
+        ('Doble clic', 'Abrir el editor de la celda; sobre la casilla, alternarla.'),
+        ('Flechas', 'Recorrer filas y celdas de la tabla.'),
+        ('Espacio', 'Alternar la casilla de la fila enfocada.'),
+        ('Esc', 'Cerrar el editor o el calendario sin guardar.'),
+        ('F1', 'Ver esta ayuda.'),
+    ]
+    table3 = doc.add_table(rows=1, cols=2)
+    table3.style = 'Light Grid Accent 1'
+    hdr3 = table3.rows[0].cells
+    hdr3[0].text = 'Atajo'
+    hdr3[1].text = 'Acción'
+    for cell in hdr3:
+        for p in cell.paragraphs:
+            for run in p.runs:
+                run.bold = True
+                run.font.size = Pt(9)
+    for key, action in shortcuts:
+        row = table3.add_row()
+        run = row.cells[0].paragraphs[0].add_run(key)
+        run.font.name = 'Consolas'
+        run.font.size = Pt(9)
+        run2 = row.cells[1].paragraphs[0].add_run(action)
+        run2.font.size = Pt(9)
 
     doc.add_page_break()
 
@@ -739,8 +819,38 @@ def create_manual():
                 'Faltan archivos necesarios (Comercializadoras.txt).',
                 'El archivo está dañado.',
             ],
-            'solution': 'Verificar que el archivo Comercializadoras.txt esté en la misma carpeta '
-                       'que el ejecutable. Si el problema persiste, solicitar una nueva copia del ejecutable.'
+            'solution': 'El ejecutable ya incluye una copia de la lista, por lo que solo sería necesario '
+                       'si se ha copiado el archivo .exe sin sus recursos. Para ampliar o corregir la '
+                       'lista de comercializadoras, dejar un archivo "Comercializadoras.txt" (uno por '
+                       'línea) en la misma carpeta que el ejecutable: tiene prioridad sobre la interna.'
+        },
+        {
+            'title': 'Mensaje: "Falta la dependencia ..."',
+            'causes': [
+                'Falta openpyxl, customtkinter o tkcalendar en el equipo.',
+            ],
+            'solution': 'Instalar las dependencias con:  pip install -r requirements.txt. '
+                       'Si se usa el ejecutable, no es necesario: ya van incluidas.'
+        },
+        {
+            'title': 'Una fecha vacía no borra la fecha que ya tenía la plantilla',
+            'causes': [
+                'Comportamiento intencionado: una fecha vacía significa "no modificar esa celda".',
+            ],
+            'solution': 'Si se quiere quitar la fecha de una plantilla existente, borrarla '
+                       'en Excel (guardando el archivo) o dejar de procesar con esa plantilla. '
+                       'Si lo que se quiere es cambiar la fecha, escribirla en la tabla antes de procesar.'
+        },
+        {
+            'title': 'La ventana no recuerda el tema, las carpetas o el tamaño',
+            'causes': [
+                'El archivo config.json se ha borrado o no se puede escribir en la carpeta '
+                'de la aplicación (por ejemplo, en Archivos de Programa).',
+            ],
+            'solution': 'La herramienta arranca con los valores por defecto: tema claro, '
+                       'carpeta Ofertas/ junto al ejecutable y tamaño por defecto. '
+                       'Ejecutarla desde una carpeta con permisos de escritura, como '
+                       'el Escritorio o Documentos, para que guarde las preferencias.'
         },
     ]
 
@@ -761,7 +871,7 @@ def create_manual():
     # GUARDAR
     # =========================================================
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'Manual_Usuario_ActualizarPrecios.docx')
+                           'Manual - ActualizarPrecios.docx')
     doc.save(output_path)
     print(f"Manual generado exitosamente: {output_path}")
     return output_path

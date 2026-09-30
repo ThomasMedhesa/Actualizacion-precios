@@ -1,29 +1,45 @@
 #!/usr/bin/env python3
 """
 Procesador de Ofertas Eléctricas.
-- Seleccionar ofertas → asignar fechas por oferta → procesar
+- Seleccionar ofertas agrupadas por comercializadora
+- Asignar fechas y Renovable una vez por comercializadora
+- Procesar y generar/actualizar las plantillas MONOPUNTO y MULTIPUNTO
+
 Uso: python procesar_ofertas.py
 """
 
+import ctypes
+import json
 import os
+import queue
 import sys
 import threading
-from datetime import date, datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime
+from tkinter import filedialog, font as tkfont, messagebox, ttk
+
+
+def _error_dependencia(paquete, detalle=""):
+    """En el ejecutable congelado no se puede ejecutar 'pip install'."""
+    texto = (f"Falta la dependencia '{paquete}'.\n\n{detalle}\n\n"
+             f"Instale con:  pip install -r requirements.txt")
+    sys.stderr.write(f"{paquete}: {detalle}\n")
+    try:
+        ctypes.windll.user32.MessageBoxW(None, texto, "Dependencia faltante", 0x10)
+    except Exception:
+        pass
+    sys.exit(1)
+
 
 try:
-    from tkcalendar import DateEntry
-except ImportError:
-    print("Instalando tkcalendar...")
-    os.system("pip install tkcalendar")
-    from tkcalendar import DateEntry
+    import customtkinter as ctk
+except ImportError as exc:
+    _error_dependencia("customtkinter", str(exc))
 
 try:
-    from openpyxl import load_workbook
-except ImportError:
-    os.system("pip install openpyxl")
-    from openpyxl import load_workbook
+    from tkcalendar import Calendar
+except ImportError as exc:
+    _error_dependencia("tkcalendar", str(exc))
 
 
 def obtener_base_dir():
@@ -33,18 +49,114 @@ def obtener_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def activar_dpi_awareness():
+    """Nitidez en monitores con escalado 125/150%."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 BASE_DIR = obtener_base_dir()
 sys.path.insert(0, BASE_DIR)
 import llenar_planillas as proc
+
 OFERTAS_DEF = proc.OFERTAS_DIR
 SALIDA_DEF = BASE_DIR
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+RUTA_COMERCIALIZADORAS = os.path.join(BASE_DIR, "Comercializadoras.txt")
 
-# Cargar lista de comercializadoras
-COMERCIALIZADORAS = []
-ruta_coms = os.path.join(BASE_DIR, "Comercializadoras.txt")
-if os.path.exists(ruta_coms):
-    with open(ruta_coms, 'r', encoding='utf-8') as f:
-        COMERCIALIZADORAS = [line.strip() for line in f if line.strip()]
+
+def _leer_comercializadoras():
+    """Lee Comercializadoras.txt. Al empaquetado se busca tambien dentro del ejecutable,
+    y si esta al lado del .exe tiene prioridad (se puede editar a mano)."""
+    candidatas = [RUTA_COMERCIALIZADORAS]
+    interna = getattr(sys, "_MEIPASS", None)
+    if interna:
+        candidatas.append(os.path.join(interna, "Comercializadoras.txt"))
+    candidatas.append(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "Comercializadoras.txt"))
+    for ruta in candidatas:
+        if os.path.exists(ruta):
+            try:
+                with open(ruta, "r", encoding="utf-8") as archivo:
+                    lineas = [line.strip() for line in archivo if line.strip()]
+                if lineas:
+                    return lineas, ruta
+            except OSError as exc:
+                sys.stderr.write(f"No se pudo leer Comercializadoras.txt: {exc}\n")
+    return [], None
+
+
+COMERCIALIZADORAS, RUTA_LEIDA = _leer_comercializadoras()
+
+VACIO = "—"
+FECHA_FMT = "%d/%m/%Y"
+
+COLUMNAS = {
+    "archivo": "Archivo / Comercializadora",
+    "com": "Comercializadora",
+    "ren": "Renovable",
+    "rec": "Recibida",
+    "ven": "Vencimiento",
+    "val": "Validez",
+    "n": "N archivos",
+}
+ORDENABLES = ("archivo", "com", "n", "ren", "rec", "ven", "val")
+CAMPOS_FECHA = {"rec": "recibida", "ven": "vencimiento", "val": "validez"}
+
+COLORES_LOG = {
+    "light": {"info": "#1667B1", "ok": "#1E8E4A", "warn": "#B9770E",
+              "error": "#C62828", "muted": "#9A9A9A", "marca": "#1667B1"},
+    "dark": {"info": "#63B3F2", "ok": "#3DDC84", "warn": "#F0B429",
+             "error": "#FF6B6B", "muted": "#7C7C7C", "marca": "#63B3F2"},
+}
+
+COLORES_ARBOL = {
+    "light": {"bg": "#FFFFFF", "fg": "#1A1A1A", "alt": "#F4F6F8", "grupo_bg": "#DCE9F7",
+              "grupo_fg": "#0D3B66", "head_bg": "#E9EDF2", "head_fg": "#33475B",
+              "head_active": "#D7E0E9", "sel_bg": "#CFE4FB", "sel_fg": "#0D3B66"},
+    "dark": {"bg": "#1B1D1F", "fg": "#E6E6E6", "alt": "#212427", "grupo_bg": "#2A3441",
+             "grupo_fg": "#DCE9F7", "head_bg": "#2B2F33", "head_fg": "#D6DBE0",
+             "head_active": "#3A4046", "sel_bg": "#2F4A66", "sel_fg": "#FFFFFF"},
+}
+
+COLOR_BOTON = "#3B8ED0"
+COLOR_BOTON_HOVER = "#36719F"
+COLOR_CANCELAR = "#C0392B"
+COLOR_CANCELAR_HOVER = "#962D22"
+
+AYUDA = """CÓMO SE USA
+
+1. Elige las carpetas
+ de ofertas (origen) y de salida (resultados).
+2. En la tabla, cada comercializadora es una fila agrupada con sus archivos.
+   Pulsa ☑ junto a un archivo para incluirlo o excluirlo.
+3. Doble clic en Renovable / Recibida / Vencimiento / Validez de la fila de la
+   comercializadora para editarlos. Se aplican a TODOS sus archivos.
+4. Si un archivo es de otra comercializadora, haz doble clic en su columna
+   Comercializadora y elige otra: el archivo se moverá de grupo.
+5. Pulsa Procesar y sigue el progreso en el panel de resultado.
+
+Las fechas vacías se dejan sin modificar en los Excel.
+
+ATAJOS DE TECLADO
+
+Ctrl+O      Elegir carpeta de ofertas
+Ctrl+S      Elegir carpeta de salida
+Ctrl+R      Refrescar la lista de archivos
+Ctrl+A      Seleccionar todos los archivos
+Ctrl+D      Deseleccionar todos los archivos
+Ctrl+Enter  Procesar las ofertas seleccionadas
+Esc         Cancelar el proceso en curso
+Ctrl+L      Limpiar el panel de resultado
+F1          Mostrar esta ayuda
+"""
 
 
 def _normalizar_com(s):
@@ -63,392 +175,1186 @@ def _buscar_comercializadora(nombre_archivo):
     return extraida
 
 
-class OfertasView(ttk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.oferta_widgets = {}
-        self.dir_ofertas = tk.StringVar(value=OFERTAS_DEF)
-        self.dir_salida = tk.StringVar(value=SALIDA_DEF)
-        self.crear_widgets()
-        self.listar_ofertas()
+def _familia_ui(root):
+    """Segoe UI Variable si existe (Windows 11), si no Segoe UI."""
+    try:
+        disponibles = set(tkfont.families(root))
+    except Exception:
+        disponibles = set()
+    for nombre in ("Segoe UI Variable Text", "Segoe UI", "Tahoma"):
+        if nombre in disponibles:
+            return nombre
+    return "TkDefaultFont"
 
-    def crear_widgets(self):
-        # --- Tema moderno ---
-        style = ttk.Style()
+
+def _fmt_fecha(d):
+    return d.strftime(FECHA_FMT) if isinstance(d, date) else VACIO
+
+
+def _modo():
+    """'light' o 'dark' en minusculas (customtkinter devuelve 'Light'/'Dark')."""
+    return (ctk.get_appearance_mode() or "light").lower()
+
+
+def cargar_config():
+    try:
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            datos = json.load(f)
+        return datos if isinstance(datos, dict) else {}
+    except Exception:
+        return {}
+
+
+def guardar_config(config):
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
+def abrir_carpeta(ruta):
+    try:
+        if os.path.isdir(ruta):
+            os.startfile(ruta)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
+# WIDGETS DE APOYO
+# ---------------------------------------------------------------------------
+
+class ToolTip:
+    """Ayuda emergente para widgets sin soporte nativo."""
+
+    def __init__(self, widget, texto, delay=500):
+        self.widget = widget
+        self.texto = texto
+        self.delay = delay
+        self._tarea = None
+        self._ventana = None
+        widget.bind("<Enter>", self._programar, add="+")
+        widget.bind("<Leave>", self._ocultar, add="+")
+        widget.bind("<ButtonPress>", self._ocultar, add="+")
+
+    def _programar(self, _evento=None):
+        self._cancelar()
         try:
-            style.theme_use('clam')
+            self._tarea = self.widget.after(self.delay, self._mostrar)
+        except tk.TclError:
+            self._tarea = None
+
+    def _cancelar(self):
+        if self._tarea is not None:
+            try:
+                self.widget.after_cancel(self._tarea)
+            except Exception:
+                pass
+            self._tarea = None
+
+    def _ocultar(self, _evento=None):
+        self._cancelar()
+        self._destruir()
+
+    def _destruir(self):
+        if self._ventana is not None:
+            try:
+                self._ventana.destroy()
+            except Exception:
+                pass
+            self._ventana = None
+
+    def _mostrar(self):
+        if self._ventana is not None:
+            return
+        try:
+            self._ventana = ctk.CTkToplevel(self.widget)
+            self._ventana.wm_overrideredirect(True)
+            self._ventana.attributes("-topmost", True)
+            etiqueta = ctk.CTkLabel(
+                self._ventana, text=self.texto, justify="left", corner_radius=6,
+                fg_color=("gray92", "gray20"), text_color=("black", "white"),
+                font=("Segoe UI", 11), wraplength=330, padx=2, pady=1,
+            )
+            etiqueta.pack()
+            self._ventana.update_idletasks()
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            ancho, alto = self._ventana.winfo_width(), self._ventana.winfo_height()
+            if x + ancho > self.widget.winfo_screenwidth() - 8:
+                x = max(8, self.widget.winfo_screenwidth() - ancho - 8)
+            if y + alto > self.widget.winfo_screenheight() - 8:
+                y = self.widget.winfo_rooty() - alto - 8
+            self._ventana.geometry(f"+{x}+{y}")
+        except Exception:
+            self._destruir()
+
+
+class SelectorFecha(ctk.CTkToplevel):
+    """Calendario emergente: el valor devuelto es una fecha o None."""
+
+    def __init__(self, parent, titulo, inicial, al_confirmar):
+        super().__init__(parent)
+        self.al_confirmar = al_confirmar
+        self.title(titulo)
+        self.resizable(False, False)
+        self.configure(fg_color=("gray95", "gray13"))
+        self.transient(parent.winfo_toplevel())
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+        self.bind("<Escape>", lambda _e: self._cancelar())
+        self.bind("<Return>", lambda _e: self._aceptar())
+
+        colores = {
+            "Dark": dict(background="#2A2C2E", foreground="#E6E6E6", bordercolor="#2A2C2E",
+                         normalbackground="#2A2C2E", normalforeground="#E6E6E6",
+                         othermonthbackground="#222426", othermonthforeground="#707070",
+                         othermonthwebackground="#222426", othermonthweforeground="#707070",
+                         weekendbackground="#303336", weekendforeground="#C8C8C8"),
+            "Light": dict(background="#F5F7FA", foreground="#1F2933", bordercolor="#D6DCE4",
+                          normalbackground="#FFFFFF", normalforeground="#1F2933",
+                          othermonthbackground="#EDF0F4", othermonthforeground="#9AA5B1",
+                          othermonthwebackground="#EDF0F4", othermonthweforeground="#9AA5B1",
+                          weekendbackground="#F0F3F8", weekendforeground="#4A5563"),
+        }[_modo().capitalize()]
+        calendario = Calendar(
+            self, date_pattern="dd/mm/yyyy", borderwidth=0,
+            headersbackground="#3B8ED0", headersforeground="#FFFFFF",
+            selectbackground="#3B8ED0", selectforeground="#FFFFFF",
+            **colores)
+        calendario.pack(padx=10, pady=(10, 4))
+        if isinstance(inicial, date):
+            calendario.selection_set(inicial)
+        else:
+            calendario.selection_clear()
+        self.calendario = calendario
+
+        botones = ctk.CTkFrame(self, fg_color="transparent")
+        botones.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(botones, text="Aceptar", width=92, command=self._aceptar).pack(
+            side="left", padx=(0, 6))
+        ctk.CTkButton(botones, text="Limpiar", width=92, fg_color="gray60",
+                      hover_color="gray50", command=self._limpiar).pack(side="left")
+        ctk.CTkButton(botones, text="Cancelar", width=92, fg_color="gray60",
+                      hover_color="gray50", command=self._cancelar).pack(side="right")
+
+        self.update_idletasks()
+        self._centrar(parent)
+        self.grab_set()
+        self.focus_force()
+
+    def _centrar(self, parent):
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 3
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    def _seleccion(self):
+        try:
+            sel = self.calendario.selection_get()
+        except Exception:
+            return None
+        if not sel:
+            return None
+        return date(sel.year, sel.month, sel.day)
+
+    def _aceptar(self):
+        fecha = self._seleccion()
+        self.destroy()
+        self.al_confirmar(fecha)
+
+    def _limpiar(self):
+        self.destroy()
+        self.al_confirmar(None)
+
+    def _cancelar(self):
+        self.destroy()
+
+
+class Oferta:
+    """Un archivo .xlsx de oferta. La comercializadora es la del grupo."""
+
+    __slots__ = ("nombre", "seleccionada")
+
+    def __init__(self, nombre, seleccionada=True):
+        self.nombre = nombre
+        self.seleccionada = seleccionada
+
+
+# ---------------------------------------------------------------------------
+# VENTANA PRINCIPAL
+# ---------------------------------------------------------------------------
+
+class OfertasView(ctk.CTk):
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = dict(config or {})
+        self.title("Gestor de Ofertas Eléctricas")
+        self.minsize(960, 640)
+
+        self.familia = _familia_ui(self)
+        # customtkinter usa Roboto por defecto, que no existe en Windows.
+        ctk.ThemeManager.theme["CTkFont"]["family"] = self.familia
+
+        self.grupos = {}            # com -> datos de la comercializadora
+        self.filas_grupo = {}       # iid -> com
+        self.filas_archivo = {}     # iid -> (com, nombre)
+        self._editor = None
+        self._orden = ("archivo", False)
+        self._visibles = 0
+        self._cola_log = queue.Queue()
+        self._hilo = None
+        self.procesando = False
+        self._tarea_config = None
+        self._config_advertida = False
+
+        self._filtro = tk.StringVar()
+        self.var_dir_ofertas = tk.StringVar(value=self._ruta_guardada("dir_ofertas", OFERTAS_DEF))
+        self.var_dir_salida = tk.StringVar(value=self._ruta_guardada("dir_salida", SALIDA_DEF))
+        self.var_modo = tk.StringVar(
+            value="Oscuro" if _modo() == "dark" else "Claro")
+
+        self._construir_ui()
+        proc.set_log_hook(self._encolar_log)
+
+        orden = self.config.get("orden")
+        if isinstance(orden, list) and len(orden) == 2 and orden[0] in ORDENABLES:
+            self._orden = (orden[0], bool(orden[1]))
+
+        self.listar_ofertas()
+        self._bucle_log()
+        self._aplicar_tema()
+        self._atajos()
+        self.geometry(self.config.get("geometry") or "1180x860")
+        self.after(80, self._centrar)
+        self.bind("<Configure>", self._config_pendiente)
+        self.protocol("WM_DELETE_WINDOW", self.cerrar)
+
+    # -- arranque ----------------------------------------------------------
+
+    def _ruta_guardada(self, clave, defecto):
+        valor = self.config.get(clave)
+        if isinstance(valor, str) and os.path.isdir(valor):
+            return valor
+        return defecto
+
+    def _centrar(self):
+        try:
+            ancho, alto = 1180, 860
+            if self.config.get("geometry"):
+                return  # la posicion guardada manda
+            x = (self.winfo_screenwidth() - ancho) // 2
+            y = (self.winfo_screenheight() - alto) // 3
+            self.geometry(f"{ancho}x{alto}+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    def _atajos(self):
+        enlaces = (
+            ("<Control-o>", self._elegir_dir_ofertas, False),
+            ("<Control-s>", self._elegir_dir_salida, False),
+            ("<Control-r>", self.listar_ofertas, False),
+            ("<Control-l>", self._limpiar_log, False),
+            ("<Control-Return>", self.procesar, False),
+            ("<Control-KP_Enter>", self.procesar, False),
+            ("<F1>", self._mostrar_ayuda, False),
+            ("<Escape>", self._al_escapar, False),
+            ("<Return>", self._intro_atajo, True),
+            ("<Control-a>", self.seleccionar_todas, True),
+            ("<Control-d>", self.deseleccionar_todas, True),
+        )
+        for secuencia, funcion, fuera_de_campos in enlaces:
+            self.bind_all(secuencia, self._atajo(funcion, fuera_de_campos))
+
+    def _atajo(self, funcion, fuera_de_campos=False):
+        def manejador(_evento):
+            if fuera_de_campos and self._en_campo_texto():
+                return None
+            funcion()
+            return "break"
+        return manejador
+
+    def _en_campo_texto(self):
+        try:
+            return self.focus_get().winfo_class() in ("Entry", "Text", "TEntry", "TCombobox")
+        except Exception:
+            return False
+
+    def _foco_en_tabla(self):
+        try:
+            return self.focus_get() is self.tree
+        except Exception:
+            return False
+
+    def _intro_atajo(self):
+        """Intro procesa, salvo que el foco esté en la tabla o haya un editor abierto."""
+        if self._editor is not None or self._en_campo_texto() or self._foco_en_tabla():
+            return
+        self.procesar()
+
+    def _al_escapar(self):
+        if self.procesando:
+            self._cancelar()
+        elif self._editor is not None:
+            self._cerrar_editor(False)
+
+    # -- construccion de la interfaz ---------------------------------------
+
+    def _construir_ui(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        # --- Cabecera ---
+        cabecera = ctk.CTkFrame(self, fg_color="transparent")
+        cabecera.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 8))
+        cabecera.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(cabecera, text="Gestor de Ofertas Eléctricas",
+                     font=(self.familia, 22, "bold"), anchor="w").grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkLabel(cabecera,
+                     text="Plantillas de precios eléctricas a partir de los archivos de oferta",
+                     font=(self.familia, 12), text_color=("gray40", "gray62"),
+                     anchor="w").grid(row=1, column=0, sticky="w", pady=(0, 2))
+        self.sw_modo = ctk.CTkSwitch(cabecera, text="Modo oscuro", variable=self.var_modo,
+                                     onvalue="Oscuro", offvalue="Claro",
+                                     command=self._cambiar_modo, font=(self.familia, 13))
+        self.sw_modo.grid(row=0, column=1, rowspan=2, padx=(0, 12))
+        ToolTip(self.sw_modo, "Alterna entre el tema claro y el oscuro")
+        btn_ayuda = ctk.CTkButton(cabecera, text="?", width=36, height=36,
+                                  font=(self.familia, 16, "bold"), command=self._mostrar_ayuda)
+        btn_ayuda.grid(row=0, column=2, rowspan=2, sticky="ne")
+        ToolTip(btn_ayuda, "Ayuda y atajos de teclado (F1)")
+
+        # --- Carpetas ---
+        self.card_rutas, contenido = self._tarjeta(
+            1, "CARPETAS", "Las carpetas MONOPUNTO y MULTIPUNTO se crean solas en la de salida")
+        contenido.grid_columnconfigure(1, weight=1)
+        for fila, (titulo, variable, accion) in enumerate((
+                ("Ofertas (origen)", self.var_dir_ofertas, self._elegir_dir_ofertas),
+                ("Salida (resultados)", self.var_dir_salida, self._elegir_dir_salida))):
+            ctk.CTkLabel(contenido, text=titulo, width=140, anchor="w",
+                         font=(self.familia, 13)).grid(
+                row=fila, column=0, sticky="w", pady=4)
+            campo = ctk.CTkLabel(contenido, textvariable=variable, anchor="w", height=32,
+                                 corner_radius=8, fg_color=("gray93", "gray20"),
+                                 font=(self.familia, 12))
+            campo.grid(row=fila, column=1, sticky="ew", padx=(0, 8), pady=4)
+            ToolTip(campo, f"{titulo}\nClic para elegir la carpeta")
+            ctk.CTkButton(contenido, text="Seleccionar…", width=118,
+                          command=accion).grid(row=fila, column=2, pady=4)
+            campo.bind("<Button-1>", lambda _e, f=accion: (f(), "break")[1])
+
+        # --- Ofertas ---
+        self.card_tabla, contenido = self._tarjeta(
+            2, "OFERTAS", "Clic en ☑ para incluir un archivo · clic en una celda para editarla")
+        contenido.grid_rowconfigure(1, weight=1)
+
+        herramientas = ctk.CTkFrame(contenido, fg_color="transparent")
+        herramientas.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        herramientas.grid_columnconfigure(1, weight=1)
+        self.ent_filtro = ctk.CTkEntry(herramientas, textvariable=self._filtro, width=300,
+                                        placeholder_text="Filtrar archivo o comercializadora…",
+                                        font=(self.familia, 13))
+        self.ent_filtro.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.ent_filtro.bind("<KeyRelease>", lambda _e: self._reconstruir())
+        self.ent_filtro.bind("<Escape>", lambda _e: self._limpiar_filtro())
+        ToolTip(self.ent_filtro, "Escribe para filtrar. Escape lo borra")
+        self.lbl_contador = ctk.CTkLabel(herramientas, text="", anchor="w",
+                                         text_color=("gray40", "gray62"),
+                                         font=(self.familia, 12))
+        self.lbl_contador.grid(row=0, column=1, sticky="w")
+        self.btn_todas = ctk.CTkButton(herramientas, text="Seleccionar todas", width=140,
+                                        command=self.seleccionar_todas, fg_color=("gray70", "gray35"))
+        self.btn_todas.grid(row=0, column=2, padx=4)
+        self.btn_ninguna = ctk.CTkButton(herramientas, text="Ninguna", width=86,
+                                         command=self.deseleccionar_todas, fg_color=("gray70", "gray35"))
+        self.btn_ninguna.grid(row=0, column=3, padx=4)
+        ctk.CTkButton(herramientas, text="↻ Refrescar", width=104,
+                      command=self.listar_ofertas, fg_color=("gray70", "gray35")).grid(
+            row=0, column=4, padx=4)
+
+        self.marco_tabla = ctk.CTkFrame(contenido, fg_color="#FFFFFF", corner_radius=10)
+        self.marco_tabla.grid(row=1, column=0, sticky="nsew", pady=(0, 2))
+        self.marco_tabla.grid_columnconfigure(0, weight=1)
+        self.marco_tabla.grid_rowconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(self.marco_tabla, style="Ofertas.Treeview",
+                                 columns=("com", "ren", "rec", "ven", "val", "n"),
+                                 show="tree headings", selectmode="browse", height=8)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.column("#0", width=340, minwidth=140, stretch=True, anchor="w")
+        for col, ancho, ancla in (("com", 215, "w"), ("ren", 95, "center"), ("rec", 105, "center"),
+                                  ("ven", 115, "center"), ("val", 105, "center"),
+                                  ("n", 90, "center")):
+            self.tree.heading(col, text=COLUMNAS[col],
+                              command=lambda c=col: self._ordenar_por(c))
+            self.tree.column(col, width=ancho, minwidth=70, stretch=False, anchor=ancla)
+        self.tree.heading("#0", text=COLUMNAS["archivo"],
+                          command=lambda: self._ordenar_por("archivo"))
+        for col in CAMPOS_FECHA:
+            self.tree.heading(col, text=COLUMNAS[col])
+        ToolTip(self.tree, "Cada fila agrupada es una comercializadora.\n"
+                           "Las fechas y Renovable se editan en esa fila y se aplican\n"
+                           "a todos sus archivos. En los archivos: clic en ☑ para incluirlos.",
+                delay=900)
+        scroll_v = ctk.CTkScrollbar(self.marco_tabla, command=self.tree.yview, width=14)
+        scroll_v.grid(row=0, column=1, sticky="ns")
+        scroll_h = ctk.CTkScrollbar(self.marco_tabla, command=self.tree.xview,
+                                    orientation="horizontal", height=14)
+        scroll_h.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=scroll_v.set, xscrollcommand=scroll_h.set)
+        self.tree.tag_configure("grupo", font=(self.familia, 12, "bold"))
+        self.tree.bind("<Button-1>", self._clic_arbol)
+        self.tree.bind("<Double-Button-1>", self._doble_clic_arbol)
+        self.tree.bind("<space>", self._espacio_arbol)
+        self.tree.bind("<Return>", lambda _e: (self._abrir_editor_actual(), "break")[1])
+
+        # --- Resultado ---
+        self.card_log, contenido = self._tarjeta(3, "RESULTADO", "Procesamiento en tiempo real")
+        contenido.grid_rowconfigure(1, weight=1)
+        contenido.grid_columnconfigure(0, weight=1)
+        acciones = ctk.CTkFrame(contenido, fg_color="transparent")
+        acciones.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        acciones.grid_columnconfigure(0, weight=1)
+        self.lbl_log = ctk.CTkLabel(acciones, text="Ctrl+L limpia este panel", anchor="w",
+                                    text_color=("gray45", "gray58"), font=(self.familia, 12))
+        self.lbl_log.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(acciones, text="Limpiar", width=84, height=28, corner_radius=8,
+                      fg_color=("gray70", "gray35"), command=self._limpiar_log).grid(
+            row=0, column=1, padx=4)
+        self.btn_mono = ctk.CTkButton(acciones, text="📂 MONOPUNTO", width=142, height=28,
+                                      corner_radius=8,
+                                      command=lambda: self._abrir_salida("MONOPUNTO"))
+        self.btn_mono.grid(row=0, column=2, padx=4)
+        self.btn_multi = ctk.CTkButton(acciones, text="📂 MULTIPUNTO", width=142, height=28,
+                                       corner_radius=8,
+                                       command=lambda: self._abrir_salida("MULTIPUNTO"))
+        self.btn_multi.grid(row=0, column=3, padx=4)
+        ToolTip(self.btn_mono, "Abre la carpeta MONOPUNTO de la carpeta de salida")
+        ToolTip(self.btn_multi, "Abre la carpeta MULTIPUNTO de la carpeta de salida")
+        self.txt_log = ctk.CTkTextbox(contenido, height=120, corner_radius=10,
+                                      font=("Consolas", 12), wrap="word",
+                                      fg_color=("gray97", "gray12"))
+        self.txt_log.grid(row=1, column=0, sticky="nsew")
+        self.txt_log.configure(state="disabled")
+
+        # --- Barra de estado ---
+        barra = ctk.CTkFrame(self, fg_color="transparent")
+        barra.grid(row=4, column=0, sticky="ew", padx=18, pady=(10, 16))
+        barra.grid_columnconfigure(1, weight=1)
+        self.barra_progreso = ctk.CTkProgressBar(barra, width=170, height=6,
+                                                  mode="indeterminate", corner_radius=3)
+        self.barra_progreso.grid(row=0, column=0, sticky="w", padx=(0, 14))
+        self.barra_progreso.grid_remove()
+        self.lbl_estado = ctk.CTkLabel(barra, text="Listo", anchor="w",
+                                        font=(self.familia, 13))
+        self.lbl_estado.grid(row=0, column=1, sticky="ew")
+        self.btn_procesar = ctk.CTkButton(barra, text="Procesar", width=240, height=46,
+                                          corner_radius=12, font=(self.familia, 15, "bold"),
+                                          command=self.procesar)
+        self.btn_procesar.grid(row=0, column=2)
+        ToolTip(self.btn_procesar, "Procesa las ofertas marcadas (Ctrl+Enter). "
+                                   "Durante el proceso pasa a ser Cancelar (Esc)")
+        self._refrescar_botones_salida()
+
+    def _tarjeta(self, fila, titulo, subtitulo):
+        tarjeta = ctk.CTkFrame(self, corner_radius=14, border_width=1,
+                               border_color=("gray82", "gray25"))
+        tarjeta.grid(row=fila, column=0, sticky="nsew", padx=18, pady=(0, 12))
+        tarjeta.grid_columnconfigure(0, weight=1)
+        cabecera = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        cabecera.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 0))
+        cabecera.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(cabecera, text=titulo, font=(self.familia, 12, "bold"),
+                     text_color=("gray35", "gray85")).grid(row=0, column=0, sticky="w")
+        if subtitulo:
+            ctk.CTkLabel(cabecera, text=subtitulo, font=(self.familia, 11),
+                         text_color=("gray50", "gray60"), anchor="e").grid(
+                row=0, column=1, sticky="e")
+        contenido = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        contenido.grid(row=1, column=0, sticky="nsew", padx=16, pady=(8, 14))
+        contenido.grid_columnconfigure(0, weight=1)
+        tarjeta.grid_rowconfigure(1, weight=1)
+        return tarjeta, contenido
+
+    # -- tema --------------------------------------------------------------
+
+    def _cambiar_modo(self):
+        ctk.set_appearance_mode("dark" if self.var_modo.get() == "Oscuro" else "light")
+        self._aplicar_tema()
+        self._guardar_config()
+
+    def _aplicar_tema(self):
+        modo = _modo()
+        colores = COLORES_ARBOL[modo]
+        estilo = ttk.Style(self)
+        try:
+            estilo.theme_use("clam")
+        except tk.TclError:
+            pass
+        estilo.configure("Ofertas.Treeview", background=colores["bg"],
+                         fieldbackground=colores["bg"], foreground=colores["fg"],
+                         rowheight=30, borderwidth=0, relief="flat", bordercolor=colores["bg"],
+                         font=(self.familia, 12))
+        estilo.map("Ofertas.Treeview", background=[("selected", colores["sel_bg"])],
+                   foreground=[("selected", colores["sel_fg"])])
+        estilo.configure("Ofertas.Treeview.Heading", background=colores["head_bg"],
+                         foreground=colores["head_fg"], relief="flat", borderwidth=0,
+                         padding=(8, 9), font=(self.familia, 11, "bold"))
+        estilo.map("Ofertas.Treeview.Heading", background=[("active", colores["head_active"])])
+        estilo.layout("Ofertas.Treeview",
+                      [("Ofertas.Treeview.treearea", {"sticky": "nswe"})])
+        self.marco_tabla.configure(fg_color=colores["bg"])
+        self.tree.tag_configure("grupo", background=colores["grupo_bg"],
+                                foreground=colores["grupo_fg"],
+                                font=(self.familia, 12, "bold"))
+        self.tree.tag_configure("impar", background=colores["alt"])
+        self.tree.tag_configure("par", background=colores["bg"])
+        self._estilizar_log()
+
+    def _estilizar_log(self):
+        colores = COLORES_LOG[_modo()]
+        # CTkTextbox no admite 'font' en tag_config (romperia el escalado).
+        for nivel in ("info", "ok", "warn", "error", "marca"):
+            self.txt_log.tag_config(nivel, foreground=colores[nivel])
+        self.txt_log.tag_config("ts", foreground=colores["muted"])
+
+    # -- log ---------------------------------------------------------------
+
+    def _encolar_log(self, nivel, texto):
+        """Callback del backend: solo encola (se invoca desde el hilo de trabajo)."""
+        self._cola_log.put((nivel, texto))
+
+    def _bucle_log(self):
+        try:
+            while True:
+                nivel, texto = self._cola_log.get_nowait()
+                if nivel == "_fin":
+                    self._terminar(texto)
+                else:
+                    self._escribir_log(nivel, texto)
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            self.after(80, self._bucle_log)
         except tk.TclError:
             pass
 
-        titulo = ttk.Label(self, text="Gestor de Ofertas Eléctricas",
-                           font=('Segoe UI', 15, 'bold'))
-        titulo.pack(pady=(10, 0))
+    def _escribir_log(self, nivel, texto):
+        self.txt_log.configure(state="normal")
+        hora = datetime.now().strftime("%H:%M:%S")
+        lineas = str(texto).rstrip("\n").split("\n")
+        for i, linea in enumerate(lineas):
+            self.txt_log.insert("end", f"{hora}  " if i == 0 else "        ", "ts")
+            if linea.strip() and set(linea.strip()) <= set("=-"):
+                self.txt_log.insert("end", linea + "\n", "ts")
+            else:
+                self.txt_log.insert("end", linea + "\n", nivel)
+        self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
 
-        # --- Selectores de directorio ---
-        dir_frame = ttk.LabelFrame(self, text="Directorios", padding=8)
-        dir_frame.pack(fill='x', padx=16, pady=6)
+    def _aviso(self, texto, nivel="info"):
+        self.txt_log.configure(state="normal")
+        self.txt_log.insert("end", datetime.now().strftime("%H:%M:%S") + "  " + texto + "\n", nivel)
+        self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
 
-        ttk.Label(dir_frame, text="Ofertas (origen):").grid(row=0, column=0, sticky='w', padx=(0, 6))
-        self.lbl_dir_ofertas = ttk.Label(dir_frame, text=OFERTAS_DEF,
-                                         foreground='#555')
-        self.lbl_dir_ofertas.grid(row=0, column=1, sticky='w')
-        ttk.Button(dir_frame, text="📂", width=3,
-                   command=self._seleccionar_dir_ofertas).grid(row=0, column=2, padx=4)
+    def _limpiar_log(self):
+        self.txt_log.configure(state="normal")
+        self.txt_log.delete("1.0", "end")
+        self.txt_log.configure(state="disabled")
 
-        ttk.Label(dir_frame, text="Salida (resultados):").grid(row=1, column=0, sticky='w', padx=(0, 6), pady=(4, 0))
-        self.lbl_dir_salida = ttk.Label(dir_frame, text=BASE_DIR,
-                                        foreground='#555')
-        self.lbl_dir_salida.grid(row=1, column=1, sticky='w', pady=(4, 0))
-        ttk.Button(dir_frame, text="📂", width=3,
-                   command=self._seleccionar_dir_salida).grid(row=1, column=2, padx=4, pady=(4, 0))
+    # -- carpetas ----------------------------------------------------------
 
-        # --- Panel dividido vertical: ofertas (arriba) + estado (abajo) ---
-        paned = ttk.PanedWindow(self, orient='vertical')
-        paned.pack(fill='both', expand=True, padx=16, pady=2)
-
-        # --- Panel superior: tabla de ofertas ---
-        frame_tabla = ttk.Frame(paned)
-        paned.add(frame_tabla, weight=3)
-
-        # Toolbar sobre la tabla (select all, deselect, refrescar)
-        toolbar = ttk.Frame(frame_tabla)
-        toolbar.pack(fill='x', pady=(0, 2))
-        ttk.Button(toolbar, text="✓ Seleccionar todas",
-                   command=self.seleccionar_todas).pack(side='left', padx=1)
-        ttk.Button(toolbar, text="✗ Deseleccionar todas",
-                   command=self.deseleccionar_todas).pack(side='left', padx=1)
-        ttk.Button(toolbar, text="↻ Refrescar",
-                   command=self.listar_ofertas).pack(side='left', padx=1)
-
-        # Canvas con scroll para la tabla de ofertas
-        self.canvas = tk.Canvas(frame_tabla, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(frame_tabla, orient='vertical', command=self.canvas.yview)
-        self.frame_ofertas = ttk.Frame(self.canvas)
-
-        self.frame_ofertas.bind("<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas_window = self.canvas.create_window(
-            (0, 0), window=self.frame_ofertas, anchor='nw')
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-
-        self.canvas.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-
-        self.canvas.bind('<Configure>', self._redimensionar_canvas)
-
-        # --- Panel inferior: estado ---
-        frame_estado = ttk.LabelFrame(paned, text="Estado", padding=4)
-        paned.add(frame_estado, weight=1)
-
-        txt_frame = ttk.Frame(frame_estado)
-        txt_frame.pack(fill='both', expand=True)
-
-        self.txt_estado = tk.Text(txt_frame, height=7, wrap='word',
-                                   state='disabled', font=('Consolas', 9),
-                                   bg='#f5f5f5', relief='flat', borderwidth=4)
-        scroll_estado = ttk.Scrollbar(txt_frame, orient='vertical',
-                                       command=self.txt_estado.yview)
-        self.txt_estado.configure(yscrollcommand=scroll_estado.set)
-        self.txt_estado.pack(side='left', fill='both', expand=True)
-        scroll_estado.pack(side='right', fill='y')
-
-        # --- Botón Procesar ---
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill='x', padx=16, pady=6)
-
-        self.btn_procesar = tk.Button(
-            btn_frame,
-            text="  ▶  Procesar ofertas seleccionadas  ",
-            command=self.procesar,
-            bg='#005fb8', fg='white',
-            font=('Segoe UI', 12, 'bold'),
-            relief='flat', padx=20, pady=8, cursor='hand2',
-            activebackground='#003d73', activeforeground='white'
-        )
-        self.btn_procesar.pack()
-
-        self.escribir_estado("Selecciona un directorio de ofertas y haz clic en Procesar.\n")
-
-    # ---- Directorios ----
-
-    def _seleccionar_dir_ofertas(self):
-        d = filedialog.askdirectory(title="Carpeta con archivos de ofertas",
-                                    initialdir=self.dir_ofertas.get())
+    def _elegir_dir_ofertas(self):
+        actual = self.var_dir_ofertas.get()
+        d = filedialog.askdirectory(title="Carpeta con los archivos de oferta",
+                                    initialdir=actual if os.path.isdir(actual) else BASE_DIR)
         if d:
-            self.dir_ofertas.set(d)
-            self.lbl_dir_ofertas.configure(text=d)
+            self.var_dir_ofertas.set(d)
+            self._guardar_config()
             self.listar_ofertas()
 
-    def _seleccionar_dir_salida(self):
+    def _elegir_dir_salida(self):
+        actual = self.var_dir_salida.get()
         d = filedialog.askdirectory(title="Carpeta donde guardar los resultados",
-                                    initialdir=self.dir_salida.get())
+                                    initialdir=actual if os.path.isdir(actual) else BASE_DIR)
         if d:
-            self.dir_salida.set(d)
-            self.lbl_dir_salida.configure(text=d)
+            self.var_dir_salida.set(d)
+            self._guardar_config()
+            self._refrescar_botones_salida()
 
-    # ---- Canvas ----
+    def _abrir_salida(self, subcarpeta):
+        ruta = os.path.join(self.var_dir_salida.get(), subcarpeta)
+        if not abrir_carpeta(ruta):
+            messagebox.showinfo("Carpeta vacía",
+                                f"Todavía no existe la carpeta:\n{ruta}", parent=self)
 
-    def _redimensionar_canvas(self, event):
-        if hasattr(self, 'canvas_window') and self.canvas_window:
-            self.canvas.itemconfig(self.canvas_window, width=event.width)
+    def _refrescar_botones_salida(self):
+        base = self.var_dir_salida.get()
+        for boton, sub in ((self.btn_mono, "MONOPUNTO"), (self.btn_multi, "MULTIPUNTO")):
+            existe = os.path.isdir(os.path.join(base, sub))
+            boton.configure(state="normal" if existe else "disabled")
 
-    # ---- Listado de ofertas ----
+    # -- listado de archivos -----------------------------------------------
 
     def listar_ofertas(self):
-        for child in self.frame_ofertas.winfo_children():
-            child.destroy()
-        self.oferta_widgets.clear()
-
-        ofertas_dir = self.dir_ofertas.get()
-
-        if not os.path.isdir(ofertas_dir):
-            ttk.Label(self.frame_ofertas,
-                      text="(La carpeta seleccionada no existe)",
-                      foreground='gray').grid(row=0, column=0, padx=6, pady=4, sticky='w')
+        if self.procesando:
             return
+        directorio = self.var_dir_ofertas.get()
+        self._cerrar_editor(False)
 
-        cols_headers = [
-            (0, '', 30),
-            (1, 'Archivo', 150),
-            (2, 'Comercializadora', 200),
-            (3, 'Renovable', 100),
-            (4, 'Recibida', 130),
-            (5, 'Vencimiento', 130),
-            (6, 'Validez', 130),
-        ]
-        for col, hdr, w in cols_headers:
-            self.frame_ofertas.columnconfigure(
-                col, weight=(1 if col == 1 else 0), minsize=w)
+        encontrados = []
+        if os.path.isdir(directorio):
+            for fname in sorted(os.listdir(directorio)):
+                if fname.endswith(".xlsx") and not fname.startswith("~$"):
+                    encontrados.append(fname)
 
-        ttk.Label(self.frame_ofertas, text="", width=4).grid(row=0, column=0)
-        ttk.Label(self.frame_ofertas, text="Archivo",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=1, padx=4, sticky='w')
-        ttk.Label(self.frame_ofertas, text="Comercializadora",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=2, padx=4)
-        ttk.Label(self.frame_ofertas, text="Renovable",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=3, padx=4)
-        ttk.Label(self.frame_ofertas, text="Recibida",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=4, padx=4)
-        ttk.Label(self.frame_ofertas, text="Vencimiento",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=5, padx=4)
-        ttk.Label(self.frame_ofertas, text="Validez",
-                  font=('Segoe UI', 9, 'bold')).grid(
-            row=0, column=6, padx=4)
+        seleccion_previa = {o.nombre: o.seleccionada
+                            for g in self.grupos.values() for o in g["archivos"]}
+        grupo_previo = {o.nombre: com for com, g in self.grupos.items() for o in g["archivos"]}
+        fechas_previas = {com: {k: v for k, v in g.items() if k != "archivos"}
+                          for com, g in self.grupos.items()}
 
-        row = 1
-        for fname in sorted(os.listdir(ofertas_dir)):
-            if not fname.endswith('.xlsx') or fname.startswith('~$'):
-                continue
-            var = tk.BooleanVar(value=True)
-            cb = ttk.Checkbutton(self.frame_ofertas, variable=var)
-            cb.grid(row=row, column=0, padx=2, pady=2, sticky='w')
+        self.grupos = {}
+        for fname in encontrados:
+            com = grupo_previo.get(fname) or _buscar_comercializadora(fname).upper()
+            self._asegurar_grupo(com, fechas_previas.get(com))
+            self.grupos[com]["archivos"].append(
+                Oferta(fname, seleccion_previa.get(fname, True)))
 
-            lbl = ttk.Label(self.frame_ofertas, text=fname)
-            lbl.grid(row=row, column=1, padx=4, pady=2, sticky='w')
+        self._reconstruir()
+        if encontrados:
+            self._aviso(f"{len(encontrados)} archivo(s) .xlsx encontrado(s) en {directorio}\n")
+        else:
+            self._aviso(f"No hay archivos .xlsx en {directorio}\n", "warn")
 
-            cbo = ttk.Combobox(self.frame_ofertas, values=COMERCIALIZADORAS,
-                                state='readonly', width=22)
-            sugerida = _buscar_comercializadora(fname)
-            if sugerida in COMERCIALIZADORAS:
-                cbo.set(sugerida)
-            elif COMERCIALIZADORAS:
-                cbo.set(COMERCIALIZADORAS[0])
-            cbo.grid(row=row, column=2, padx=4, pady=2, sticky='ew')
-
-            cbo_ren = ttk.Combobox(self.frame_ofertas, values=['No', 'Si'],
-                                    state='readonly', width=6)
-            cbo_ren.set('No')
-            cbo_ren.grid(row=row, column=3, padx=4, pady=2)
-
-            e_rec = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
-                              width=12, background='#005fb8',
-                              foreground='white', borderwidth=2)
-            e_rec.set_date(date.today())
-            e_rec.grid(row=row, column=4, padx=4, pady=2)
-
-            e_ven = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
-                              width=12, background='#005fb8',
-                              foreground='white', borderwidth=2)
-            e_ven.grid(row=row, column=5, padx=4, pady=2)
-
-            e_val = DateEntry(self.frame_ofertas, date_pattern='dd/mm/yyyy',
-                              width=12, background='#005fb8',
-                              foreground='white', borderwidth=2)
-            e_val.grid(row=row, column=6, padx=4, pady=2)
-
-            self.oferta_widgets[fname] = {
-                'var': var,
-                'comercializadora': cbo,
-                'renovable': cbo_ren,
-                'recibida': e_rec,
-                'vencimiento': e_ven,
-                'validez': e_val,
+    def _asegurar_grupo(self, com, datos_previos=None):
+        com = (com or "SIN COMERCIALIZADORA").strip().upper()
+        if com not in self.grupos:
+            previos = datos_previos or {}
+            self.grupos[com] = {
+                "renovable": previos.get("renovable", "No"),
+                "recibida": previos.get("recibida", date.today()),
+                "vencimiento": previos.get("vencimiento"),
+                "validez": previos.get("validez"),
+                "archivos": [],
             }
-            row += 1
+        return self.grupos[com]
 
-        if not self.oferta_widgets:
-            ttk.Label(self.frame_ofertas,
-                      text="(No hay archivos .xlsx en el directorio seleccionado)",
-                      foreground='gray').grid(row=1, column=0, columnspan=5, padx=6, pady=4)
+    # -- tabla -------------------------------------------------------------
 
-    # ---- Acciones ----
+    def _reconstruir(self):
+        """Repinta la tabla a partir del modelo (filtro + orden + grupos)."""
+        pos_y = self.tree.yview()[0] if self.tree.get_children() else 0.0
+        previos = self.tree.get_children()
+        # Solo se recuerdan los grupos que el usuario pliego: los nuevos salen abiertos.
+        cerrados = {iid for iid in previos if not self.tree.item(iid, "open")}
+        self._cerrar_editor(False)
+
+        filtro = self._filtro.get().strip().lower()
+        columna, inversa = self._orden
+
+        def coincide(grupo_com, oferta):
+            if not filtro:
+                return True
+            return filtro in oferta.nombre.lower() or filtro in grupo_com.lower()
+
+        claves = []
+        for com, g in self.grupos.items():
+            visibles = [o for o in g["archivos"] if coincide(com, o)]
+            if filtro and not visibles:
+                continue
+            claves.append((self._clave_grupo(com, g), com, visibles))
+        claves.sort(key=lambda t: t[0], reverse=inversa)
+
+        self.tree.delete(*self.tree.get_children())
+        self.filas_grupo.clear()
+        self.filas_archivo.clear()
+        total_visibles = 0
+        for indice, (_clave, com, visibles) in enumerate(claves):
+            g = self.grupos[com]
+            paridad = "impar" if indice % 2 else "par"
+            iid_grupo = f"G::{com}"
+            padre = self.tree.insert(
+                "", "end", iid=iid_grupo, open=bool(filtro) or iid_grupo not in cerrados,
+                text=f"  {com}   ({len(visibles)} archivo{'s' if len(visibles) != 1 else ''})",
+                values=(com, g["renovable"], _fmt_fecha(g["recibida"]),
+                        _fmt_fecha(g["vencimiento"]), _fmt_fecha(g["validez"]),
+                        str(len(g["archivos"]))),
+                tags=("grupo", paridad))
+            self.filas_grupo[padre] = com
+            for oferta in sorted(visibles, key=lambda o: o.nombre.lower()):
+                marca = "☑" if oferta.seleccionada else "☐"
+                hijo = self.tree.insert(
+                    padre, "end", iid=f"A::{com}::{oferta.nombre}",
+                    text=f"      {marca} {oferta.nombre}",
+                    values=(com, "", "", "", "", ""),
+                    tags=(paridad,))
+                self.filas_archivo[hijo] = (com, oferta.nombre)
+                total_visibles += 1
+
+        self._visibles = total_visibles
+        self._actualizar_titulos()
+        try:
+            self.tree.yview_moveto(pos_y)
+        except Exception:
+            pass
+        self._actualizar_contadores()
+
+    def _clave_grupo(self, com, g):
+        columna = self._orden[0]
+        if columna == "n":
+            return (1, len(g["archivos"]), com)
+        if columna == "ren":
+            return (1, g["renovable"], com)
+        if columna in CAMPOS_FECHA:
+            valor = g[CAMPOS_FECHA[columna]]
+            return (1, valor or date.min, com)
+        if columna == "com":
+            return (0, com.lower())
+        return (0, min((o.nombre.lower() for o in g["archivos"]), default=com.lower()))
+
+    def _ordenar_por(self, columna):
+        if columna not in ORDENABLES:
+            return
+        if self._orden[0] == columna:
+            self._orden = (columna, not self._orden[1])
+        else:
+            self._orden = (columna, False)
+        self._reconstruir()
+        self._guardar_config()
+
+    def _actualizar_titulos(self):
+        columna, inversa = self._orden
+        flecha = " ▼" if inversa else " ▲"
+        self.tree.heading("#0", text=COLUMNAS["archivo"] + (flecha if columna == "archivo" else ""))
+        for col in COLUMNAS:
+            if col == "archivo":
+                continue
+            marca = flecha if columna == col else ""
+            self.tree.heading(col, text=COLUMNAS[col] + marca)
+
+    def _actualizar_contadores(self):
+        total = sum(len(g["archivos"]) for g in self.grupos.values())
+        seleccionados = len(self._seleccion())
+        grupos = len(self.grupos)
+        if not total:
+            texto = "No hay archivos .xlsx en la carpeta seleccionada"
+        else:
+            texto = (f"Mostrando {self._visibles} de {total} archivo(s) · "
+                     f"{seleccionados} seleccionado(s) · {grupos} comercializadora(s)")
+        self.lbl_contador.configure(text=texto)
+        self.btn_procesar.configure(text=f"Procesar {seleccionados} oferta(s)"
+                                    if seleccionados else "Procesar")
+
+    def _seleccion(self):
+        return [o for g in self.grupos.values() for o in g["archivos"] if o.seleccionada]
+
+    def _alternar_seleccion(self, iid):
+        if iid not in self.filas_archivo:
+            return
+        _com, nombre = self.filas_archivo[iid]
+        for g in self.grupos.values():
+            for oferta in g["archivos"]:
+                if oferta.nombre == nombre:
+                    oferta.seleccionada = not oferta.seleccionada
+                    marca = "☑" if oferta.seleccionada else "☐"
+                    texto = self.tree.item(iid, "text")
+                    self.tree.item(iid, text=texto.replace("☑", marca, 1)
+                                   .replace("☐", marca, 1))
+                    self._actualizar_contadores()
+                    return
 
     def seleccionar_todas(self):
-        for w in self.oferta_widgets.values():
-            w['var'].set(True)
+        if self.procesando:
+            return
+        for g in self.grupos.values():
+            for oferta in g["archivos"]:
+                oferta.seleccionada = True
+        self._reconstruir()
 
     def deseleccionar_todas(self):
-        for w in self.oferta_widgets.values():
-            w['var'].set(False)
+        if self.procesando:
+            return
+        for g in self.grupos.values():
+            for oferta in g["archivos"]:
+                oferta.seleccionada = False
+        self._reconstruir()
 
-    def escribir_estado(self, texto):
-        self.txt_estado.configure(state='normal')
-        self.txt_estado.insert('end', texto)
-        self.txt_estado.see('end')
-        self.txt_estado.configure(state='disabled')
+    def _limpiar_filtro(self):
+        self._filtro.set("")
+        self.ent_filtro.delete(0, "end")
+        self._reconstruir()
+
+    # -- interaccion con la tabla ------------------------------------------
+
+    def _columna_clave(self, identificador):
+        """Convierte '#1' en el nombre real de la columna ('com', 'ven', ...)."""
+        if not identificador:
+            return None
+        if not identificador.startswith("#"):
+            return identificador
+        try:
+            return self.tree["columns"][int(identificador[1:]) - 1]
+        except Exception:
+            return None
+
+    def _clic_arbol(self, evento, forzar=False):
+        if self.procesando:
+            return None
+        region = self.tree.identify_region(evento.x, evento.y)
+        if region not in ("tree", "cell"):
+            return None
+        iid = self.tree.identify_row(evento.y)
+        col = self._columna_clave(self.tree.identify_column(evento.x))
+        if not iid:
+            return None
+        if iid in self.filas_archivo and region == "tree":
+            self._alternar_seleccion(iid)
+            return None
+        if col == "#0":
+            return None
+        self._abrir_editor(iid, col, forzar=forzar)
+        return None
+
+    def _doble_clic_arbol(self, evento):
+        iid = self.tree.identify_row(evento.y)
+        col = self._columna_clave(self.tree.identify_column(evento.x))
+        if not iid or col in (None, "#0"):
+            return None
+        self._abrir_editor(iid, col, forzar=True)
+        return "break"
+
+    def _espacio_arbol(self, _evento):
+        if self.procesando:
+            return None
+        seleccion = self.tree.selection()
+        if not seleccion:
+            return None
+        iid = seleccion[0]
+        if iid in self.filas_archivo:
+            self._alternar_seleccion(iid)
+        elif iid in self.filas_grupo:
+            abierto = bool(self.tree.item(iid, "open"))
+            self.tree.item(iid, open=not abierto)
+        return "break"
+
+    def _abrir_editor_actual(self):
+        iid = self.tree.focus()
+        if not iid:
+            return
+        if iid in self.filas_archivo:
+            self._abrir_editor(iid, "com")
+        elif iid in self.filas_grupo:
+            self._abrir_editor(iid, "ren")
+
+    def _descartar_editor(self):
+        """Destruye el widget del editor actual sin confirmar nada."""
+        editor = self._editor
+        self._editor = None
+        if editor:
+            try:
+                editor["widget"].destroy()
+            except Exception:
+                pass
+
+    def _cerrar_editor(self, commit=True):
+        editor = self._editor
+        if not editor:
+            return
+        self._editor = None
+        if commit and editor["tipo"] == "com":
+            valor = (editor["var"].get() or "").strip().upper()
+            if valor and valor != editor["com_origen"]:
+                self._mover_archivo(editor["nombre"], editor["com_origen"], valor)
+        try:
+            editor["widget"].destroy()
+        except Exception:
+            pass
+        if commit:
+            self._reconstruir()
+
+    def _abrir_editor(self, iid, col, forzar=False):
+        if self._editor is not None and self._editor.get("iid") == iid and \
+                self._editor.get("col") == col:
+            return
+        self._cerrar_editor(True)
+        caja = self.tree.bbox(iid, col)
+        if not caja:
+            # La fila puede estar fuera de la vista: se trae y se reintenta.
+            self.tree.see(iid)
+            self.update_idletasks()
+            caja = self.tree.bbox(iid, col)
+        if not caja:
+            return
+        x, y, ancho, alto = caja
+        if iid in self.filas_archivo and col == "com":
+            self._editor = self._editor_comercializadora(iid, x, y, ancho, alto)
+        elif iid in self.filas_grupo:
+            if col == "ren":
+                self._editor = self._editor_renovable(iid, x, y, ancho, alto)
+            elif col in CAMPOS_FECHA:
+                self._editor = self._editor_fecha(iid, col, x, y, ancho, alto)
+
+    def _editor_comercializadora(self, iid, x, y, ancho, alto):
+        com, nombre = self.filas_archivo[iid]
+        var = ctk.StringVar(value=com)
+        combo = ctk.CTkComboBox(self.tree, width=max(ancho, 210), height=max(alto - 4, 24),
+                                variable=var, values=COMERCIALIZADORAS,
+                                font=(self.familia, 12), border_width=1,
+                                dropdown_font=(self.familia, 12))
+        combo.place(x=x, y=y)
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._cerrar_editor(True))
+        combo.bind("<Escape>", lambda _e: self._cerrar_editor(False))
+        combo.bind("<FocusOut>", lambda _e: self.after(80, self._cerrar_editor, True))
+        combo.focus_set()
+        return {"tipo": "com", "iid": iid, "col": "com", "widget": combo, "var": var,
+                "com_origen": com, "nombre": nombre}
+
+    def _editor_renovable(self, iid, x, y, ancho, alto):
+        com = self.filas_grupo[iid]
+        var = ctk.StringVar(value=self.grupos[com]["renovable"])
+
+        def al_cambiar(valor):
+            self.grupos[com]["renovable"] = valor
+            self._descartar_editor()
+            self._reconstruir()
+
+        menu = ctk.CTkOptionMenu(self.tree, width=max(ancho, 90), height=max(alto - 4, 24),
+                                 values=["No", "Si"], command=al_cambiar, variable=var,
+                                 font=(self.familia, 12), dropdown_font=(self.familia, 12),
+                                 corner_radius=6)
+        menu.place(x=x, y=y)
+        menu.bind("<Escape>", lambda _e: self._cerrar_editor(False))
+        return {"tipo": "ren", "iid": iid, "col": "ren", "widget": menu}
+
+    def _editor_fecha(self, iid, col, x, y, ancho, alto):
+        com = self.filas_grupo[iid]
+        campo = CAMPOS_FECHA[col]
+        fecha = self.grupos[com][campo]
+
+        def al_confirmar(elegida):
+            self._descartar_editor()
+            if com in self.grupos:
+                self.grupos[com][campo] = elegida
+            self._reconstruir()
+
+        boton = ctk.CTkButton(self.tree, text=_fmt_fecha(fecha), width=max(ancho, 96),
+                              height=max(alto - 4, 24), corner_radius=6, anchor="w",
+                              font=(self.familia, 12), border_width=1,
+                              command=lambda: SelectorFecha(self, COLUMNAS[col], fecha, al_confirmar))
+        boton.place(x=x, y=y)
+        return {"tipo": "fecha", "iid": iid, "col": col, "widget": boton}
+
+    def _mover_archivo(self, nombre, com_origen, com_nueva):
+        origen = self.grupos.get(com_origen)
+        if origen is None or com_nueva == com_origen:
+            return
+        oferta = next((o for o in origen["archivos"] if o.nombre == nombre), None)
+        if oferta is None:
+            return
+        origen["archivos"] = [o for o in origen["archivos"] if o.nombre != nombre]
+        if not origen["archivos"]:
+            del self.grupos[com_origen]
+        self._asegurar_grupo(com_nueva)["archivos"].append(oferta)
+        self._aviso(f"{nombre}: comercializadora cambiada a {com_nueva}\n")
+
+    # -- procesado ---------------------------------------------------------
 
     def procesar(self):
-        seleccionadas = [(f, w) for f, w in self.oferta_widgets.items() if w['var'].get()]
+        if self.procesando:
+            self._cancelar()
+            return
+        if not COMERCIALIZADORAS:
+            messagebox.showerror(
+                "Falta Comercializadoras.txt",
+                f"No se encontró la lista de comercializadoras:\n{RUTA_COMERCIALIZADORAS}\n\n"
+                "Colócala en la misma carpeta que el ejecutable.", parent=self)
+            return
+
+        seleccionadas = self._seleccion()
         if not seleccionadas:
             messagebox.showwarning("Sin selección",
-                                   "Selecciona al menos una oferta para procesar.")
+                                   "Selecciona al menos una oferta para procesar.", parent=self)
             return
 
+        fechas_com, filename_to_com = self._recolectar()
+        incompletas = [com for com, d in fechas_com.items()
+                       if not d["Vencimiento"] or not d["Validez"]]
+        salida = self.var_dir_salida.get()
+        detalle = (f"Ofertas seleccionadas: {len(seleccionadas)}\n"
+                   f"Comercializadoras: {len(fechas_com)}\n"
+                   f"Carpeta de salida: {salida}\n")
+        if incompletas:
+            detalle += (f"\n{incompletas[0]}"
+                        + (f" (+{len(incompletas) - 1} más)" if len(incompletas) > 1 else "")
+                        + "\nSin fecha de Vencimiento/Validez: esas columnas se dejarán "
+                          "sin modificar en los Excel.\n")
+        detalle += "\n¿Procesar ahora?"
+        if not messagebox.askyesno("Procesar ofertas", detalle, parent=self):
+            return
+
+        ofertas_dir = self.var_dir_ofertas.get()
+        proc.CANCELAR.clear()
+        self.procesando = True
+        self._cerrar_editor(False)
+        self.btn_procesar.configure(text="Cancelar", fg_color=COLOR_CANCELAR,
+                                    hover_color=COLOR_CANCELAR_HOVER)
+        self.barra_progreso.grid()
+        self.barra_progreso.start()
+        self.lbl_estado.configure(text=f"Procesando {len(seleccionadas)} oferta(s)…")
+        self._aviso(f"\nProcesando {len(seleccionadas)} oferta(s) hacia {salida}\n", "marca")
+        self._hilo = threading.Thread(
+            target=self._trabajo,
+            args=([o.nombre for o in seleccionadas], fechas_com, filename_to_com,
+                  ofertas_dir, salida), daemon=True)
+        self._hilo.start()
+
+    def _recolectar(self):
         fechas_com = {}
         filename_to_com = {}
-        for fname, w in seleccionadas:
-            com = w['comercializadora'].get().strip().upper()
-            if not com:
-                com = proc.extract_comercializadora(fname)
+        for com, g in self.grupos.items():
+            elegidas = [o for o in g["archivos"] if o.seleccionada]
+            if not elegidas:
+                continue
             fechas_com[com] = {
-                'Recibida': w['recibida'].get_date(),
-                'Vencimiento': w['vencimiento'].get_date(),
-                'Validez': w['validez'].get_date(),
-                'Renovable': w['renovable'].get(),
+                "Recibida": g["recibida"],
+                "Vencimiento": g["vencimiento"],
+                "Validez": g["validez"],
+                "Renovable": g["renovable"],
             }
-            filename_to_com[fname] = com
+            for oferta in elegidas:
+                filename_to_com[oferta.nombre] = com
+        return fechas_com, filename_to_com
 
-        fnames = [f for f, _ in seleccionadas]
-        self.btn_procesar.configure(state='disabled', text="  ⏳  Procesando...  ",
-                                     bg='#888')
-
-        self.escribir_estado(
-            f"> Procesando {len(fnames)} oferta(s): {', '.join(fnames)}\n\n"
-        )
-
-        self.output_lines = []
-        ofertas_dir = self.dir_ofertas.get()
-        salida_dir = self.dir_salida.get()
-        self.thread = threading.Thread(
-            target=self._procesar_thread,
-            args=(fnames, fechas_com, filename_to_com, ofertas_dir, salida_dir),
-            daemon=True
-        )
-        self.after_id = None
-        self.thread.start()
-        self.poll_thread()
-
-    def _procesar_thread(self, fnames, fechas_com, filename_to_com,
-                          ofertas_dir, salida_dir):
-        original_stdout = sys.stdout if sys.stdout is not None else open(os.devnull, 'w')
-        class Captura:
-            def __init__(self, lista, original):
-                self.lista = lista
-                self.original = original
-            def write(self, text):
-                self.original.write(text)
-                self.lista.append(text)
-            def flush(self):
-                self.original.flush()
-        sys.stdout = Captura(self.output_lines, original_stdout)
-
+    def _trabajo(self, fnames, fechas_com, filename_to_com, ofertas_dir, salida_dir):
+        import traceback
+        resumen = {"mono": 0, "multi": 0, "cancelado": True, "total": len(fnames)}
+        mono_dir = os.path.join(salida_dir, "MONOPUNTO")
+        multi_dir = os.path.join(salida_dir, "MULTIPUNTO")
         try:
             ofertas_mp, ofertas_mt = proc.leer_ofertas(
-                fnames=fnames, filename_to_com=filename_to_com,
-                ofertas_dir=ofertas_dir
-            )
-            n_mp = len(ofertas_mp)
-            n_mt = len(ofertas_mt)
-
-            mono_dir = os.path.join(salida_dir, 'MONOPUNTO')
-            multi_dir = os.path.join(salida_dir, 'MULTIPUNTO')
+                fnames=fnames, filename_to_com=filename_to_com, ofertas_dir=ofertas_dir)
+            resumen["mono"] = len(ofertas_mp)
+            resumen["multi"] = len(ofertas_mt)
             os.makedirs(mono_dir, exist_ok=True)
             os.makedirs(multi_dir, exist_ok=True)
-
-            if n_mp > 0:
-                proc.procesar_clientes(ofertas_mp, mono_dir,
-                                       es_monopunto=True, tipo_label="MONOPUNTO",
-                                       fechas_com=fechas_com)
-            if n_mt > 0:
-                proc.procesar_clientes(ofertas_mt, multi_dir,
-                                       es_monopunto=False, tipo_label="MULTIPUNTO",
-                                       fechas_com=fechas_com)
-
-            resumen = (
-                f"\n"
-                f"{'='*50}\n"
-                f"  Proceso completado!\n"
-                f"  Ofertas procesadas: {len(fnames)}\n"
-                f"  Clientes MONOPUNTO: {n_mp}\n"
-                f"  Clientes MULTIPUNTO: {n_mt}\n"
-                f"{'='*50}\n"
-            )
-            self.output_lines.append(resumen)
-
-            if n_mp > 0:
-                self.output_lines.append(f"\nSalida: {mono_dir}\n")
-                self.output_lines.append("MONOPUNTO:\n")
-                for k, v in sorted(ofertas_mp.items()):
-                    coms = list(v['_comercializadoras'].keys())
-                    self.output_lines.append(
-                        f"  {v['_nombre']} -> {coms}\n"
-                    )
-            if n_mt > 0:
-                self.output_lines.append(f"\nSalida: {multi_dir}\n")
-                self.output_lines.append("MULTIPUNTO:\n")
-                for k, v in sorted(ofertas_mt.items()):
-                    coms = list(v['_comercializadoras'].keys())
-                    self.output_lines.append(
-                        f"  {v['_nombre']} -> {coms}\n"
-                    )
-
-        except Exception as e:
-            self.output_lines.append(f"\nERROR: {e}\n")
-            import traceback
-            self.output_lines.append(traceback.format_exc())
+            if ofertas_mp:
+                proc.procesar_clientes(ofertas_mp, mono_dir, es_monopunto=True,
+                                       tipo_label="MONOPUNTO", fechas_com=fechas_com)
+            if ofertas_mt:
+                proc.procesar_clientes(ofertas_mt, multi_dir, es_monopunto=False,
+                                       tipo_label="MULTIPUNTO", fechas_com=fechas_com)
+            resumen["cancelado"] = proc.hubo_cancelacion()
+        except Exception as exc:
+            proc.log(f"\nERROR: {exc}\n", "error")
+            proc.log(traceback.format_exc(), "error")
+            resumen["error"] = True
         finally:
-            sys.stdout = original_stdout
+            self._cola_log.put(("_fin", resumen))
 
-    def poll_thread(self):
-        if self.thread is None or not self.thread.is_alive():
-            for line in self.output_lines:
-                self.escribir_estado(line)
-            self.output_lines.clear()
-            self.btn_procesar.configure(state='normal',
-                                         text="  ▶  Procesar ofertas seleccionadas  ",
-                                         bg='#005fb8')
+    def _cancelar(self):
+        proc.CANCELAR.set()
+        self.lbl_estado.configure(text="Cancelando…")
+
+    def _terminar(self, resumen):
+        self.procesando = False
+        self.barra_progreso.stop()
+        self.barra_progreso.set(0)
+        self.barra_progreso.grid_remove()
+        self.btn_procesar.configure(text="Procesar", fg_color=COLOR_BOTON,
+                                    hover_color=COLOR_BOTON_HOVER)
+        self._cerrar_editor(False)
+        self._refrescar_botones_salida()
+        self._actualizar_contadores()
+        if resumen.get("error"):
+            self.lbl_estado.configure(text="Terminado con errores")
             return
+        if resumen.get("cancelado"):
+            self.lbl_estado.configure(text="Cancelado por el usuario")
+            self._aviso("Proceso cancelado.\n", "warn")
+            return
+        self.lbl_estado.configure(
+            text=f"Listo · {resumen['mono']} monopunto · {resumen['multi']} multipunto")
+        self._aviso("\nProceso completado\n", "marca")
+        self._aviso(f"Ofertas procesadas: {resumen.get('total', 0)}\n"
+                    f"Clientes MONOPUNTO: {resumen['mono']}\n"
+                    f"Clientes MULTIPUNTO: {resumen['multi']}\n"
+                    f"Carpeta: {self.var_dir_salida.get()}\n", "ok")
 
-        for line in self.output_lines:
-            self.escribir_estado(line)
-        self.output_lines.clear()
-        self.after_id = self.after(100, self.poll_thread)
+    # -- configuracion y cierre --------------------------------------------
+
+    def _config_pendiente(self, _evento=None):
+        if self._tarea_config is None:
+            try:
+                self._tarea_config = self.after(700, self._guardar_config)
+            except tk.TclError:
+                self._tarea_config = None
+
+    def _guardar_config(self):
+        self._tarea_config = None
+        config = {
+            "dir_ofertas": self.var_dir_ofertas.get(),
+            "dir_salida": self.var_dir_salida.get(),
+            "geometry": self.geometry(),
+            "apariencia": _modo(),
+            "orden": list(self._orden),
+        }
+        if not guardar_config(config) and not self._config_advertida:
+            self._config_advertida = True
+            self._aviso("No se pudo guardar config.json (¿carpeta de solo lectura?). "
+                        "Se usará la carpeta Ofertas/ por defecto.\n", "warn")
+
+    def cerrar(self):
+        if self.procesando:
+            if not messagebox.askyesno(
+                    "Proceso en curso",
+                    "Todavía se están escribiendo archivos.\n"
+                    "Si cierras ahora, algún Excel puede quedar incompleto.\n\n¿Cerrar de todos modos?",
+                    parent=self):
+                return
+            proc.CANCELAR.set()
+        self._guardar_config()
+        self.destroy()
+
+    def _mostrar_ayuda(self):
+        ventana = ctk.CTkToplevel(self)
+        ventana.title("Ayuda")
+        ventana.configure(fg_color=("gray95", "gray13"))
+        ventana.resizable(False, False)
+        ventana.transient(self)
+        texto = ctk.CTkTextbox(ventana, width=520, height=430, corner_radius=10,
+                               font=("Consolas", 12), wrap="word",
+                               fg_color=("gray97", "gray10"))
+        texto.pack(padx=14, pady=(14, 8))
+        texto.insert("1.0", AYUDA)
+        texto.configure(state="disabled")
+        ctk.CTkButton(ventana, text="Cerrar", width=110, command=ventana.destroy).pack(pady=(0, 14))
+        ventana.update_idletasks()
+        try:
+            x = self.winfo_rootx() + (self.winfo_width() - ventana.winfo_width()) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - ventana.winfo_height()) // 3
+            ventana.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
 
 
 def main():
-    root = tk.Tk()
-    root.title("Gestor de Ofertas Eléctricas")
-    root.geometry("950x700")
-    root.minsize(750, 550)
-    app = OfertasView(root)
-    app.pack(fill='both', expand=True)
-    root.mainloop()
+    activar_dpi_awareness()
+    config = cargar_config()
+    ctk.set_appearance_mode(config.get("apariencia") or "light")
+    app = OfertasView(config)
+    app.mainloop()
 
 
 if __name__ == '__main__':
     main()
+

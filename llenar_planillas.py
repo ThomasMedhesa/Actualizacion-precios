@@ -13,15 +13,52 @@ Formato de oferta esperado:
 import os
 import sys
 import re
+import threading
 from datetime import date
 from collections import defaultdict
 
 try:
     from openpyxl import load_workbook, Workbook
     from openpyxl.utils import get_column_letter
-except ImportError:
-    os.system("pip install openpyxl")
-    from openpyxl import load_workbook, Workbook
+except ImportError as exc:
+    sys.stderr.write(
+        "Falta la dependencia 'openpyxl'. Instálela con:  pip install -r requirements.txt\n"
+        f"Detalle: {exc}\n"
+    )
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# LOG Y CANCELACION
+# ---------------------------------------------------------------------------
+
+# levels: info | ok | warn | error
+_LOG_HOOK = None
+
+# Se activa para que el usuario pueda detener un proceso largo.
+CANCELAR = threading.Event()
+
+
+def set_log_hook(fn):
+    """Registra un callback (nivel, mensaje) para el log de la interfaz.
+    Los mensajes se siguen mostrando por consola (comportamiento original)."""
+    global _LOG_HOOK
+    _LOG_HOOK = fn
+
+
+def log(mensaje, nivel="info"):
+    """Escribe un mensaje y lo notifica al hook de la interfaz."""
+    print(mensaje, end="")
+    if _LOG_HOOK is not None:
+        try:
+            _LOG_HOOK(nivel, mensaje)
+        except Exception:
+            pass
+
+
+def hubo_cancelacion():
+    return CANCELAR.is_set()
+
 
 def obtener_base_dir():
     """Obtiene el directorio base, compatible con PyInstaller."""
@@ -177,30 +214,34 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
         if fnames is not None and fname not in fnames:
             continue
 
+        if hubo_cancelacion():
+            log("Proceso cancelado por el usuario.\n", "warn")
+            break
+
         if filename_to_com and fname in filename_to_com:
             comercializadora = filename_to_com[fname].strip().upper()
         else:
             comercializadora = extract_comercializadora(fname)
         filepath = os.path.join(ofertas_dir, fname)
-        print(f"\nProcesando: {fname} -> Comercializadora: {comercializadora}")
+        log(f"\nProcesando: {fname} -> Comercializadora: {comercializadora}\n")
 
         try:
             wb = load_workbook(filepath, data_only=True)
         except Exception as e:
-            print(f"  Error al abrir: {e}")
+            log(f"  Error al abrir: {e}\n", "error")
             continue
 
         if 'PETICION OFERTAS' not in wb.sheetnames:
-            print(f"  Hoja 'PETICION OFERTAS' no encontrada, saltando")
+            log("  Hoja 'PETICION OFERTAS' no encontrada, saltando\n", "warn")
             continue
 
         ws = wb['PETICION OFERTAS']
 
         if not detectar_formato(ws):
-            print(f"  Formato no reconocido (sin precios en col Z-AE), saltando")
+            log("  Formato no reconocido (sin precios en col Z-AE), saltando\n", "warn")
             continue
 
-        print(f"  Formato detectado correctamente")
+        log("  Formato detectado correctamente\n", "ok")
         # PASE 1: agrupar filas por Codigo
         rows_by_codigo = defaultdict(list)
         current_cliente = None
@@ -278,7 +319,7 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
 
         n_codigos = len(rows_by_codigo)
         n_clientes = len(codigos_por_cliente)
-        print(f"  {n_codigos} suministros, {n_clientes} clientes")
+        log(f"  {n_codigos} suministros, {n_clientes} clientes\n")
 
     # Clasificar: MONOPUNTO = 1 codigo, MULTIPUNTO = >1 codigos
     clientes_mp = {}
@@ -362,14 +403,13 @@ def _escribir_datos_com(ws, row_idx, cols, com, fechas_com):
     if datos is None:
         return
     recibida, vencimiento, validez, renovable = datos
-    ws.cell(row=row_idx, column=cols['Recibida']).value = recibida
-    ws.cell(row=row_idx, column=cols['Recibida']).number_format = 'DD/MM/YYYY'
-    ws.cell(row=row_idx, column=cols['Vencimiento']).value = vencimiento
-    if vencimiento is not None:
-        ws.cell(row=row_idx, column=cols['Vencimiento']).number_format = 'DD/MM/YYYY'
-    ws.cell(row=row_idx, column=cols['Validez']).value = validez
-    if validez is not None:
-        ws.cell(row=row_idx, column=cols['Validez']).number_format = 'DD/MM/YYYY'
+    # Una fecha vacia significa "no modificar": deja la celda como esta.
+    for clave, valor in (('Recibida', recibida), ('Vencimiento', vencimiento), ('Validez', validez)):
+        if valor is None:
+            continue
+        celda = ws.cell(row=row_idx, column=cols[clave])
+        celda.value = valor
+        celda.number_format = 'DD/MM/YYYY'
     ws.cell(row=row_idx, column=cols['Renovable']).value = renovable
 
 
@@ -555,14 +595,14 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
 
     try:
         if archivo_existente:
-            print(f"    Plantilla existente: {os.path.basename(archivo_existente)}")
+            log(f"    Plantilla existente: {os.path.basename(archivo_existente)}\n")
             wb = load_workbook(archivo_existente)
             ws = wb['Plantilla']
             _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto, fechas_com)
             output_path = archivo_existente
         else:
             output_path = os.path.join(directorio, nom_archivo)
-            print(f"    Creando nueva plantilla: {nom_archivo}")
+            log(f"    Creando nueva plantilla: {nom_archivo}\n")
             if es_monopunto:
                 wb = crear_plantilla_monopunto(cliente_info, fechas_com)
             else:
@@ -571,11 +611,11 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
 
         auto_ajustar_columnas(ws)
         wb.save(output_path)
-        print(f"    Guardado: {os.path.basename(output_path)}")
+        log(f"    Guardado: {os.path.basename(output_path)}\n", "ok")
     except PermissionError:
-        print(f"    ERROR: No se pudo guardar '{os.path.basename(output_path)}' - archivo abierto en Excel?")
+        log(f"    ERROR: No se pudo guardar '{os.path.basename(output_path)}' - archivo abierto en Excel?\n", "error")
     except Exception as e:
-        print(f"    ERROR al guardar: {e}")
+        log(f"    ERROR al guardar: {e}\n", "error")
 
 
 def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto, fechas_com=None):
@@ -672,12 +712,15 @@ def procesar_clientes(clientes_dict, directorio, es_monopunto, tipo_label, fecha
     """Procesa todos los clientes en clientes_dict.
     fechas_com: {comercializadora: {'Recibida': date, 'Vencimiento': date, 'Validez': date}}
     """
-    print(f"\n[{tipo_label}] Procesando {len(clientes_dict)} clientes...")
+    log(f"\n[{tipo_label}] Procesando {len(clientes_dict)} clientes...\n")
     for cliente_norm, info in sorted(clientes_dict.items()):
+        if hubo_cancelacion():
+            log("  Proceso cancelado por el usuario.\n", "warn")
+            return
         nom = info['_nombre']
         coms = list(info['_comercializadoras'].keys())
-        print(f"\n  Cliente: {nom}")
-        print(f"    Comercializadoras: {coms}")
+        log(f"\n  Cliente: {nom}\n")
+        log(f"    Comercializadoras: {coms}\n")
         actualizar_o_crear_plantilla(info, directorio, es_monopunto, fechas_com)
 
 
@@ -712,9 +755,13 @@ def main():
     print("\n[3/3] Procesando plantillas MULTIPUNTO...")
     procesar_clientes(ofertas_mt, MULTIPUNTO_DIR, es_monopunto=False, tipo_label="MULTIPUNTO")
 
-    print("\n" + "=" * 60)
-    print("Proceso completado!")
-    print("=" * 60)
+    if hubo_cancelacion():
+        log("\nProceso cancelado por el usuario.\n", "warn")
+    else:
+        print("\n" + "=" * 60)
+        print("Proceso completado!")
+        print("=" * 60)
+        log("Proceso completado!\n", "ok")
 
 
 if __name__ == '__main__':
