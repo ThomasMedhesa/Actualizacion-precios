@@ -5,7 +5,10 @@ a = Analysis(
     ['procesar_ofertas.py'],
     pathex=[],
     binaries=[],
-    datas=[('Comercializadoras.txt', '.')],
+    datas=[
+        ('Comercializadoras.txt', '.'),
+        ('assets/actualizar_precios.ico', 'assets'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +38,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/actualizar_precios.ico',
 )

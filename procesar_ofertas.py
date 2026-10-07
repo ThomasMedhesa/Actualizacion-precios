@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Procesador de Ofertas Eléctricas.
-- Seleccionar ofertas agrupadas por comercializadora
-- Asignar fechas y Renovable una vez por comercializadora
+- Una fila por archivo de oferta
+- Asignar comercializadora, Renovable y fechas de cada oferta
 - Procesar y generar/actualizar las plantillas MONOPUNTO y MULTIPUNTO
 
 Uso: python procesar_ofertas.py
@@ -15,6 +15,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from calendar import monthrange
 from datetime import date, datetime
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -63,6 +64,8 @@ def activar_dpi_awareness():
 
 
 BASE_DIR = obtener_base_dir()
+ICON_PATH = os.path.join(
+    getattr(sys, "_MEIPASS", BASE_DIR), "assets", "actualizar_precios.ico")
 sys.path.insert(0, BASE_DIR)
 import llenar_planillas as proc
 
@@ -97,18 +100,22 @@ COMERCIALIZADORAS, RUTA_LEIDA = _leer_comercializadoras()
 
 VACIO = "—"
 FECHA_FMT = "%d/%m/%Y"
+# Formatos que se aceptan al escribir o pegar una fecha en la celda.
+FORMATOS_FECHA = ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y",
+                  "%d.%m.%y", "%Y-%m-%d", "%Y/%m/%d")
 
 COLUMNAS = {
-    "archivo": "Archivo / Comercializadora",
+    "archivo": "Archivo",
     "com": "Comercializadora",
     "ren": "Renovable",
     "rec": "Recibida",
     "ven": "Vencimiento",
     "val": "Validez",
-    "n": "N archivos",
 }
-ORDENABLES = ("archivo", "com", "n", "ren", "rec", "ven", "val")
+ORDENABLES = ("archivo", "com", "ren", "rec", "ven", "val")
 CAMPOS_FECHA = {"rec": "recibida", "ven": "vencimiento", "val": "validez"}
+COLUMNAS_FECHA = ("rec", "ven", "val")
+SIN_COMERCIALIZADORA = "SIN COMERCIALIZADORA"
 
 COLORES_LOG = {
     "light": {"info": "#1667B1", "ok": "#1E8E4A", "warn": "#B9770E",
@@ -118,11 +125,11 @@ COLORES_LOG = {
 }
 
 COLORES_ARBOL = {
-    "light": {"bg": "#FFFFFF", "fg": "#1A1A1A", "alt": "#F4F6F8", "grupo_bg": "#DCE9F7",
-              "grupo_fg": "#0D3B66", "head_bg": "#E9EDF2", "head_fg": "#33475B",
+    "light": {"bg": "#FFFFFF", "fg": "#1A1A1A", "alt": "#F4F6F8",
+              "aviso": "#B9770E", "head_bg": "#E9EDF2", "head_fg": "#33475B",
               "head_active": "#D7E0E9", "sel_bg": "#CFE4FB", "sel_fg": "#0D3B66"},
-    "dark": {"bg": "#1B1D1F", "fg": "#E6E6E6", "alt": "#212427", "grupo_bg": "#2A3441",
-             "grupo_fg": "#DCE9F7", "head_bg": "#2B2F33", "head_fg": "#D6DBE0",
+    "dark": {"bg": "#1B1D1F", "fg": "#E6E6E6", "alt": "#212427",
+             "aviso": "#F0B429", "head_bg": "#2B2F33", "head_fg": "#D6DBE0",
              "head_active": "#3A4046", "sel_bg": "#2F4A66", "sel_fg": "#FFFFFF"},
 }
 
@@ -133,17 +140,28 @@ COLOR_CANCELAR_HOVER = "#962D22"
 
 AYUDA = """CÓMO SE USA
 
-1. Elige las carpetas
- de ofertas (origen) y de salida (resultados).
-2. En la tabla, cada comercializadora es una fila agrupada con sus archivos.
-   Pulsa ☑ junto a un archivo para incluirlo o excluirlo.
-3. Doble clic en Renovable / Recibida / Vencimiento / Validez de la fila de la
-   comercializadora para editarlos. Se aplican a TODOS sus archivos.
-4. Si un archivo es de otra comercializadora, haz doble clic en su columna
-   Comercializadora y elige otra: el archivo se moverá de grupo.
-5. Pulsa Procesar y sigue el progreso en el panel de resultado.
+1. Elige las carpetas de ofertas (origen) y de salida (resultados).
+2. La tabla tiene UNA FILA POR ARCHIVO de oferta.
+   Pulsa ☑ en la fila (o Espacio con ella enfocada) para incluirla o excluirla.
+3. Clic en Comercializadora, Renovable o en cualquier fecha para editarla.
+   En las fechas puedes escribir o pegar dd/mm/aaaa, o pulsar el botón 📅
+   para abrir el calendario. Intro confirma; Tab confirma y baja a la fila
+   siguiente; Esc deja la celda como estaba.
+4. Ctrl+C copia la fila enfocada y Ctrl+V la pega en la fila enfocada.
+5. Si aparece ⚠ delante de una comercializadora es que hay otro archivo con
+   la misma. En el Excel final solo puede haber una fila por comercializadora,
+   así que hay que cambiar la comercializadora de uno de los dos.
+6. Pulsa Procesar y sigue el progreso en el panel de resultado.
 
-Las fechas vacías se dejan sin modificar en los Excel.
+POR DEFECTO
+
+Recibida    hoy
+Vencimiento fin del mes actual del año siguiente (02/10/2026 -> 31/10/2027)
+Validez     vacía
+Renovable   No
+
+Una fecha vacía significa "no modificar": en los Excel que ya existen se deja
+la celda de esa fecha tal cual estaba.
 
 ATAJOS DE TECLADO
 
@@ -152,11 +170,45 @@ Ctrl+S      Elegir carpeta de salida
 Ctrl+R      Refrescar la lista de archivos
 Ctrl+A      Seleccionar todos los archivos
 Ctrl+D      Deseleccionar todos los archivos
-Ctrl+Enter  Procesar las ofertas seleccionadas
-Esc         Cancelar el proceso en curso
+Ctrl+C      Copiar la fila enfocada al portapapeles
+Ctrl+V      Pegar en la fila enfocada
+Intro       Procesar / abrir el editor de la celda
+Tab         Confirmar la fecha y bajar a la fila siguiente
+Espacio     Alternar la casilla de la fila enfocada
+Esc         Cancelar el proceso en curso / cerrar el editor sin guardar
 Ctrl+L      Limpiar el panel de resultado
 F1          Mostrar esta ayuda
 """
+
+
+def _fin_de_mes_proximo(referencia=None):
+    """Ultimo dia del mes de referencia, un ano por delante.
+    Si hoy es 02/10/2026 devuelve 31/10/2027."""
+    ref = referencia or date.today()
+    return date(ref.year + 1, ref.month, monthrange(ref.year + 1, ref.month)[1])
+
+
+def _parsear_fecha(texto):
+    """Convierte lo escrito o pegado en una fecha.
+
+    Devuelve (fecha, error): fecha es date o None (vacio), error es str o None.
+    Acepta tabuladores y saltos de linea de un pegado desde Excel."""
+    limpio = str(texto or "").replace("\t", " ").replace("\n", " ")
+    limpio = limpio.replace("\r", " ").strip().strip("\"'").strip()
+    if not limpio or limpio == VACIO:
+        return None, None
+    for formato in FORMATOS_FECHA:
+        try:
+            return datetime.strptime(limpio, formato).date(), None
+        except ValueError:
+            continue
+    return None, f"'{limpio}' no es una fecha válida (usa dd/mm/aaaa)"
+
+
+def _normalizar_renovable(valor):
+    """'si', 'Sí', 'S', '1', 'yes'... -> 'Si'. Cualquier otra cosa -> 'No'."""
+    limpio = str(valor or "").strip().lower().replace(".", "")
+    return "Si" if limpio in ("si", "s", "1", "y", "yes", "true", "x") else "No"
 
 
 def _normalizar_com(s):
@@ -320,17 +372,17 @@ class SelectorFecha(ctk.CTkToplevel):
                           othermonthwebackground="#EDF0F4", othermonthweforeground="#9AA5B1",
                           weekendbackground="#F0F3F8", weekendforeground="#4A5563"),
         }[_modo().capitalize()]
-        calendario = Calendar(
+        cal = Calendar(
             self, date_pattern="dd/mm/yyyy", borderwidth=0,
             headersbackground="#3B8ED0", headersforeground="#FFFFFF",
             selectbackground="#3B8ED0", selectforeground="#FFFFFF",
             **colores)
-        calendario.pack(padx=10, pady=(10, 4))
+        cal.pack(padx=10, pady=(10, 4))
         if isinstance(inicial, date):
-            calendario.selection_set(inicial)
+            cal.selection_set(inicial)
         else:
-            calendario.selection_clear()
-        self.calendario = calendario
+            cal.selection_clear()
+        self.calendario = cal
 
         botones = ctk.CTkFrame(self, fg_color="transparent")
         botones.pack(fill="x", padx=10, pady=(0, 10))
@@ -377,13 +429,27 @@ class SelectorFecha(ctk.CTkToplevel):
 
 
 class Oferta:
-    """Un archivo .xlsx de oferta. La comercializadora es la del grupo."""
+    """Un archivo .xlsx de oferta: una fila de la tabla con todos sus datos.
 
-    __slots__ = ("nombre", "seleccionada")
+    Los valores por defecto son: Recibida hoy, Vencimiento a fin del mes
+    actual del año siguiente, Validez vacía y Renovable "No". Al recargar la
+    carpeta se reutiliza `anterior` (la Oferta previa del mismo archivo) para
+    no perder lo que el usuario haya escrito a mano."""
 
-    def __init__(self, nombre, seleccionada=True):
+    __slots__ = ("nombre", "comercializadora", "renovable", "recibida",
+                 "vencimiento", "validez", "seleccionada")
+
+    def __init__(self, nombre, comercializadora, anterior=None, seleccionada=None):
         self.nombre = nombre
-        self.seleccionada = seleccionada
+        self.comercializadora = comercializadora or SIN_COMERCIALIZADORA
+        self.renovable = anterior.renovable if anterior else "No"
+        self.recibida = (anterior.recibida if anterior and anterior.recibida
+                         else date.today())
+        self.vencimiento = (anterior.vencimiento if anterior
+                            else _fin_de_mes_proximo())
+        self.validez = anterior.validez if anterior else None
+        self.seleccionada = (anterior.seleccionada if anterior and seleccionada is None
+                             else True if seleccionada is None else seleccionada)
 
 
 # ---------------------------------------------------------------------------
@@ -395,17 +461,20 @@ class OfertasView(ctk.CTk):
         super().__init__()
         self.config = dict(config or {})
         self.title("Gestor de Ofertas Eléctricas")
+        self.iconbitmap(ICON_PATH)
         self.minsize(960, 640)
 
         self.familia = _familia_ui(self)
         # customtkinter usa Roboto por defecto, que no existe en Windows.
         ctk.ThemeManager.theme["CTkFont"]["family"] = self.familia
 
-        self.grupos = {}            # com -> datos de la comercializadora
-        self.filas_grupo = {}       # iid -> com
-        self.filas_archivo = {}     # iid -> (com, nombre)
+        self.ofertas = {}            # nombre de archivo -> Oferta
+        self.filas = {}              # iid de la tabla -> nombre de archivo
         self._editor = None
         self._orden = ("archivo", False)
+        self._col_enfoque = "com"    # columna del último clic (la que abre Intro)
+        self._portapapeles = None    # ultima fila copiada, para pegar con Ctrl+V
+        self._avisadas = set()       # comercializadoras repetidas ya avisadas
         self._visibles = 0
         self._cola_log = queue.Queue()
         self._hilo = None
@@ -467,6 +536,8 @@ class OfertasView(ctk.CTk):
             ("<Return>", self._intro_atajo, True),
             ("<Control-a>", self.seleccionar_todas, True),
             ("<Control-d>", self.deseleccionar_todas, True),
+            ("<Control-c>", self._copiar_fila, True),
+            ("<Control-v>", self._pegar_en_fila, True),
         )
         for secuencia, funcion, fuera_de_campos in enlaces:
             self.bind_all(secuencia, self._atajo(funcion, fuera_de_campos))
@@ -479,11 +550,25 @@ class OfertasView(ctk.CTk):
             return "break"
         return manejador
 
+    CLASES_TEXTO = ("Entry", "Text", "TEntry", "TCombobox")
+
     def _en_campo_texto(self):
+        """True si el foco esta en algo donde se escribe texto.
+
+        Los Entry de customtkinter son Frames que por dentro tienen un Entry
+        de Tcl, asi que se sube por los padres hasta encontrarlo."""
+        classes = self.CLASES_TEXTO
         try:
-            return self.focus_get().winfo_class() in ("Entry", "Text", "TEntry", "TCombobox")
+            widget = self.focus_get()
         except Exception:
             return False
+        while widget is not None:
+            if widget.winfo_class() in clases or isinstance(
+                    widget, (ctk.CTkEntry, ctk.CTkComboBox, ctk.CTkOptionMenu,
+                             ctk.CTkTextbox)):
+                return True
+            widget = getattr(widget, "master", None)
+        return False
 
     def _foco_en_tabla(self):
         try:
@@ -584,23 +669,23 @@ class OfertasView(ctk.CTk):
         self.marco_tabla.grid_rowconfigure(0, weight=1)
 
         self.tree = ttk.Treeview(self.marco_tabla, style="Ofertas.Treeview",
-                                 columns=("com", "ren", "rec", "ven", "val", "n"),
+                                 columns=("com", "ren", "rec", "ven", "val"),
                                  show="tree headings", selectmode="browse", height=8)
         self.tree.grid(row=0, column=0, sticky="nsew")
-        self.tree.column("#0", width=340, minwidth=140, stretch=True, anchor="w")
-        for col, ancho, ancla in (("com", 215, "w"), ("ren", 95, "center"), ("rec", 105, "center"),
-                                  ("ven", 115, "center"), ("val", 105, "center"),
-                                  ("n", 90, "center")):
+        self.tree.column("#0", width=360, minwidth=140, stretch=True, anchor="w")
+        for col, ancho, ancla in (("com", 200, "w"), ("ren", 90, "center"),
+                                  ("rec", 105, "center"), ("ven", 115, "center"),
+                                  ("val", 105, "center")):
             self.tree.heading(col, text=COLUMNAS[col],
                               command=lambda c=col: self._ordenar_por(c))
             self.tree.column(col, width=ancho, minwidth=70, stretch=False, anchor=ancla)
         self.tree.heading("#0", text=COLUMNAS["archivo"],
                           command=lambda: self._ordenar_por("archivo"))
-        for col in CAMPOS_FECHA:
-            self.tree.heading(col, text=COLUMNAS[col])
-        ToolTip(self.tree, "Cada fila agrupada es una comercializadora.\n"
-                           "Las fechas y Renovable se editan en esa fila y se aplican\n"
-                           "a todos sus archivos. En los archivos: clic en ☑ para incluirlos.",
+        ToolTip(self.tree, "Una fila por archivo de oferta.\n"
+                           "Clic en ☑ para incluirlo, clic en una celda para editarla.\n"
+                           "En las fechas: escribe o pega dd/mm/aaaa, o pulsa 📅.\n"
+                           "Ctrl+C copia la fila enfocada y Ctrl+V la pega en otra.\n"
+                           "⚠ avisa de que dos archivos son de la misma comercializadora.",
                 delay=900)
         scroll_v = ctk.CTkScrollbar(self.marco_tabla, command=self.tree.yview, width=14)
         scroll_v.grid(row=0, column=1, sticky="ns")
@@ -608,7 +693,7 @@ class OfertasView(ctk.CTk):
                                     orientation="horizontal", height=14)
         scroll_h.grid(row=1, column=0, sticky="ew")
         self.tree.configure(yscrollcommand=scroll_v.set, xscrollcommand=scroll_h.set)
-        self.tree.tag_configure("grupo", font=(self.familia, 12, "bold"))
+        self.tree.tag_configure("duplicado", foreground="#B9770E")
         self.tree.bind("<Button-1>", self._clic_arbol)
         self.tree.bind("<Double-Button-1>", self._doble_clic_arbol)
         self.tree.bind("<space>", self._espacio_arbol)
@@ -710,9 +795,7 @@ class OfertasView(ctk.CTk):
         estilo.layout("Ofertas.Treeview",
                       [("Ofertas.Treeview.treearea", {"sticky": "nswe"})])
         self.marco_tabla.configure(fg_color=colores["bg"])
-        self.tree.tag_configure("grupo", background=colores["grupo_bg"],
-                                foreground=colores["grupo_fg"],
-                                font=(self.familia, 12, "bold"))
+        self.tree.tag_configure("duplicado", foreground=colores["aviso"])
         self.tree.tag_configure("impar", background=colores["alt"])
         self.tree.tag_configure("par", background=colores["bg"])
         self._estilizar_log()
@@ -817,91 +900,64 @@ class OfertasView(ctk.CTk):
                 if fname.endswith(".xlsx") and not fname.startswith("~$"):
                     encontrados.append(fname)
 
-        seleccion_previa = {o.nombre: o.seleccionada
-                            for g in self.grupos.values() for o in g["archivos"]}
-        grupo_previo = {o.nombre: com for com, g in self.grupos.items() for o in g["archivos"]}
-        fechas_previas = {com: {k: v for k, v in g.items() if k != "archivos"}
-                          for com, g in self.grupos.items()}
-
-        self.grupos = {}
+        # Cada archivo conserva sus datos al recargar la carpeta.
+        previas = self.ofertas
+        self.ofertas = {}
         for fname in encontrados:
-            com = grupo_previo.get(fname) or _buscar_comercializadora(fname).upper()
-            self._asegurar_grupo(com, fechas_previas.get(com))
-            self.grupos[com]["archivos"].append(
-                Oferta(fname, seleccion_previa.get(fname, True)))
+            anterior = previas.get(fname)
+            com = (anterior.comercializadora if anterior
+                   else _buscar_comercializadora(fname).upper())
+            self.ofertas[fname] = Oferta(fname, com.strip().upper(), anterior)
+        # Solo se vuelve a avisar de las repetidas que no se habían visto antes.
+        self._avisadas &= set(self._com_repetidas())
 
         self._reconstruir()
+        self._avisar_repetidas()
         if encontrados:
             self._aviso(f"{len(encontrados)} archivo(s) .xlsx encontrado(s) en {directorio}\n")
         else:
             self._aviso(f"No hay archivos .xlsx en {directorio}\n", "warn")
 
-    def _asegurar_grupo(self, com, datos_previos=None):
-        com = (com or "SIN COMERCIALIZADORA").strip().upper()
-        if com not in self.grupos:
-            previos = datos_previos or {}
-            self.grupos[com] = {
-                "renovable": previos.get("renovable", "No"),
-                "recibida": previos.get("recibida", date.today()),
-                "vencimiento": previos.get("vencimiento"),
-                "validez": previos.get("validez"),
-                "archivos": [],
-            }
-        return self.grupos[com]
-
     # -- tabla -------------------------------------------------------------
 
     def _reconstruir(self):
-        """Repinta la tabla a partir del modelo (filtro + orden + grupos)."""
+        """Repinta la tabla a partir del modelo (filtro + orden)."""
         pos_y = self.tree.yview()[0] if self.tree.get_children() else 0.0
-        previos = self.tree.get_children()
-        # Solo se recuerdan los grupos que el usuario pliego: los nuevos salen abiertos.
-        cerrados = {iid for iid in previos if not self.tree.item(iid, "open")}
+        # La fila enfocada y la seleccion se reponen: si no, despues de editar
+        # una celda el Ctrl+V no tendria fila de destino.
+        foco_previo = self.tree.focus()
+        seleccion_previa = [i for i in self.tree.selection() if i in self.ofertas]
         self._cerrar_editor(False)
 
         filtro = self._filtro.get().strip().lower()
         columna, inversa = self._orden
-
-        def coincide(grupo_com, oferta):
-            if not filtro:
-                return True
-            return filtro in oferta.nombre.lower() or filtro in grupo_com.lower()
+        repetidas = self._com_repetidas()
 
         claves = []
-        for com, g in self.grupos.items():
-            visibles = [o for o in g["archivos"] if coincide(com, o)]
-            if filtro and not visibles:
+        for oferta in self.ofertas.values():
+            if filtro and not (filtro in oferta.nombre.lower()
+                               or filtro in oferta.comercializadora.lower()):
                 continue
-            claves.append((self._clave_grupo(com, g), com, visibles))
+            claves.append((self._clave_fila(oferta), oferta))
         claves.sort(key=lambda t: t[0], reverse=inversa)
 
         self.tree.delete(*self.tree.get_children())
-        self.filas_grupo.clear()
-        self.filas_archivo.clear()
-        total_visibles = 0
-        for indice, (_clave, com, visibles) in enumerate(claves):
-            g = self.grupos[com]
-            paridad = "impar" if indice % 2 else "par"
-            iid_grupo = f"G::{com}"
-            padre = self.tree.insert(
-                "", "end", iid=iid_grupo, open=bool(filtro) or iid_grupo not in cerrados,
-                text=f"  {com}   ({len(visibles)} archivo{'s' if len(visibles) != 1 else ''})",
-                values=(com, g["renovable"], _fmt_fecha(g["recibida"]),
-                        _fmt_fecha(g["vencimiento"]), _fmt_fecha(g["validez"]),
-                        str(len(g["archivos"]))),
-                tags=("grupo", paridad))
-            self.filas_grupo[padre] = com
-            for oferta in sorted(visibles, key=lambda o: o.nombre.lower()):
-                marca = "☑" if oferta.seleccionada else "☐"
-                hijo = self.tree.insert(
-                    padre, "end", iid=f"A::{com}::{oferta.nombre}",
-                    text=f"      {marca} {oferta.nombre}",
-                    values=(com, "", "", "", "", ""),
-                    tags=(paridad,))
-                self.filas_archivo[hijo] = (com, oferta.nombre)
-                total_visibles += 1
+        self.filas.clear()
+        self._visibles = 0
+        for indice, (_clave, oferta) in enumerate(claves):
+            com = oferta.comercializadora or VACIO
+            if oferta.comercializadora.upper() in repetidas:
+                com = f"⚠ {com}"
+            self.tree.insert(
+                "", "end", iid=oferta.nombre,
+                text=f"{'☑' if oferta.seleccionada else '☐'} {oferta.nombre}",
+                values=(com, oferta.renovable, _fmt_fecha(oferta.recibida),
+                        _fmt_fecha(oferta.vencimiento), _fmt_fecha(oferta.validez)),
+                tags=("impar" if indice % 2 else "par",))
+            self.filas[oferta.nombre] = oferta.nombre
+            self._visibles += 1
 
-        self._visibles = total_visibles
+        self._reponer_foco(foco_previo, seleccion_previa)
         self._actualizar_titulos()
         try:
             self.tree.yview_moveto(pos_y)
@@ -909,18 +965,29 @@ class OfertasView(ctk.CTk):
             pass
         self._actualizar_contadores()
 
-    def _clave_grupo(self, com, g):
+    def _reponer_foco(self, foco_previo, seleccion_previa):
+        """Vuelve a dejar enfocada y seleccionada la fila que estaba, si sigue
+        en pantalla (al filtrar u ordenar puede desaparecer)."""
+        visibles = [i for i in seleccion_previa if self.tree.exists(i)]
+        if visibles:
+            self.tree.selection_set(*visibles)
+        if foco_previo and self.tree.exists(foco_previo):
+            try:
+                self.tree.focus(foco_previo)
+            except tk.TclError:
+                pass
+
+    def _clave_fila(self, oferta):
+        """Clave de ordenacion de una fila (empieza por 0 o por 1 segun el tipo)."""
         columna = self._orden[0]
-        if columna == "n":
-            return (1, len(g["archivos"]), com)
+        nombre = oferta.nombre.lower()
         if columna == "ren":
-            return (1, g["renovable"], com)
+            return (1, (oferta.renovable or "").lower(), nombre)
         if columna in CAMPOS_FECHA:
-            valor = g[CAMPOS_FECHA[columna]]
-            return (1, valor or date.min, com)
+            return (1, getattr(oferta, CAMPOS_FECHA[columna]) or date.min, nombre)
         if columna == "com":
-            return (0, com.lower())
-        return (0, min((o.nombre.lower() for o in g["archivos"]), default=com.lower()))
+            return (0, oferta.comercializadora.lower(), nombre)
+        return (0, nombre)
 
     def _ordenar_por(self, columna):
         if columna not in ORDENABLES:
@@ -943,50 +1010,63 @@ class OfertasView(ctk.CTk):
             self.tree.heading(col, text=COLUMNAS[col] + marca)
 
     def _actualizar_contadores(self):
-        total = sum(len(g["archivos"]) for g in self.grupos.values())
+        total = len(self.ofertas)
         seleccionados = len(self._seleccion())
-        grupos = len(self.grupos)
+        coms = len({o.comercializadora for o in self.ofertas.values()})
+        repetidas = self._com_repetidas()
         if not total:
             texto = "No hay archivos .xlsx en la carpeta seleccionada"
         else:
             texto = (f"Mostrando {self._visibles} de {total} archivo(s) · "
-                     f"{seleccionados} seleccionado(s) · {grupos} comercializadora(s)")
+                     f"{seleccionados} seleccionado(s) · {coms} comercializadora(s)")
+            if repetidas:
+                texto += (f" · ⚠ {len(repetidas)} comercializadora(s) repetida(s): "
+                          "cambia la de uno de los archivos")
         self.lbl_contador.configure(text=texto)
         self.btn_procesar.configure(text=f"Procesar {seleccionados} oferta(s)"
                                     if seleccionados else "Procesar")
 
     def _seleccion(self):
-        return [o for g in self.grupos.values() for o in g["archivos"] if o.seleccionada]
+        """Ofertas marcadas, en orden alfabético (estable entre llamadas)."""
+        return sorted((o for o in self.ofertas.values() if o.seleccionada),
+                      key=lambda o: o.nombre.lower())
+
+    def _oferta_de_fila(self, iid):
+        if not iid:
+            return None
+        return self.ofertas.get(self.filas.get(iid, iid))
+
+    def _fila_activa(self):
+        iid = self.tree.focus()
+        if not iid:
+            seleccion = self.tree.selection()
+            iid = seleccion[0] if seleccion else ""
+        return iid
 
     def _alternar_seleccion(self, iid):
-        if iid not in self.filas_archivo:
+        if self.procesando:
             return
-        _com, nombre = self.filas_archivo[iid]
-        for g in self.grupos.values():
-            for oferta in g["archivos"]:
-                if oferta.nombre == nombre:
-                    oferta.seleccionada = not oferta.seleccionada
-                    marca = "☑" if oferta.seleccionada else "☐"
-                    texto = self.tree.item(iid, "text")
-                    self.tree.item(iid, text=texto.replace("☑", marca, 1)
-                                   .replace("☐", marca, 1))
-                    self._actualizar_contadores()
-                    return
+        oferta = self._oferta_de_fila(iid)
+        if oferta is None:
+            return
+        oferta.seleccionada = not oferta.seleccionada
+        marca = "☑" if oferta.seleccionada else "☐"
+        texto = self.tree.item(iid, "text")
+        self.tree.item(iid, text=texto.replace("☑", marca, 1).replace("☐", marca, 1))
+        self._actualizar_contadores()
 
     def seleccionar_todas(self):
         if self.procesando:
             return
-        for g in self.grupos.values():
-            for oferta in g["archivos"]:
-                oferta.seleccionada = True
+        for oferta in self.ofertas.values():
+            oferta.seleccionada = True
         self._reconstruir()
 
     def deseleccionar_todas(self):
         if self.procesando:
             return
-        for g in self.grupos.values():
-            for oferta in g["archivos"]:
-                oferta.seleccionada = False
+        for oferta in self.ofertas.values():
+            oferta.seleccionada = False
         self._reconstruir()
 
     def _limpiar_filtro(self):
@@ -1017,10 +1097,10 @@ class OfertasView(ctk.CTk):
         col = self._columna_clave(self.tree.identify_column(evento.x))
         if not iid:
             return None
-        if iid in self.filas_archivo and region == "tree":
+        if col in self.tree["columns"]:
+            self._col_enfoque = col      # la columna en la que se hace clic
+        if region == "tree":
             self._alternar_seleccion(iid)
-            return None
-        if col == "#0":
             return None
         self._abrir_editor(iid, col, forzar=forzar)
         return None
@@ -1036,33 +1116,27 @@ class OfertasView(ctk.CTk):
     def _espacio_arbol(self, _evento):
         if self.procesando:
             return None
-        seleccion = self.tree.selection()
-        if not seleccion:
+        iid = self._fila_activa()
+        if not iid:
             return None
-        iid = seleccion[0]
-        if iid in self.filas_archivo:
-            self._alternar_seleccion(iid)
-        elif iid in self.filas_grupo:
-            abierto = bool(self.tree.item(iid, "open"))
-            self.tree.item(iid, open=not abierto)
+        self._alternar_seleccion(iid)
         return "break"
 
     def _abrir_editor_actual(self):
-        iid = self.tree.focus()
+        """Intro abre el editor de la ultima columna en la que se hizo clic."""
+        iid = self._fila_activa()
         if not iid:
             return
-        if iid in self.filas_archivo:
-            self._abrir_editor(iid, "com")
-        elif iid in self.filas_grupo:
-            self._abrir_editor(iid, "ren")
+        col = self._col_enfoque if self._col_enfoque in self.tree["columns"] else "com"
+        self._abrir_editor(iid, col)
 
     def _descartar_editor(self):
-        """Destruye el widget del editor actual sin confirmar nada."""
+        """Destruye los widgets del editor actual sin confirmar nada."""
         editor = self._editor
         self._editor = None
-        if editor:
+        for widget in (editor or {}).get("widgets", []):
             try:
-                editor["widget"].destroy()
+                widget.destroy()
             except Exception:
                 pass
 
@@ -1070,21 +1144,22 @@ class OfertasView(ctk.CTk):
         editor = self._editor
         if not editor:
             return
-        self._editor = None
         if commit and editor["tipo"] == "com":
             valor = (editor["var"].get() or "").strip().upper()
-            if valor and valor != editor["com_origen"]:
-                self._mover_archivo(editor["nombre"], editor["com_origen"], valor)
-        try:
-            editor["widget"].destroy()
-        except Exception:
-            pass
+            oferta = self._oferta_de_fila(editor["iid"])
+            if oferta is not None and valor and valor != editor["com_origen"]:
+                oferta.comercializadora = valor
+                self._aviso(f"{oferta.nombre}: comercializadora cambiada a {valor}\n")
+        self._descartar_editor()
         if commit:
             self._reconstruir()
+            self._avisar_repetidas()
 
     def _abrir_editor(self, iid, col, forzar=False):
         if self._editor is not None and self._editor.get("iid") == iid and \
                 self._editor.get("col") == col:
+            return
+        if self.procesando or self._oferta_de_fila(iid) is None:
             return
         self._cerrar_editor(True)
         caja = self.tree.bbox(iid, col)
@@ -1096,16 +1171,16 @@ class OfertasView(ctk.CTk):
         if not caja:
             return
         x, y, ancho, alto = caja
-        if iid in self.filas_archivo and col == "com":
+        if col == "com":
             self._editor = self._editor_comercializadora(iid, x, y, ancho, alto)
-        elif iid in self.filas_grupo:
-            if col == "ren":
-                self._editor = self._editor_renovable(iid, x, y, ancho, alto)
-            elif col in CAMPOS_FECHA:
-                self._editor = self._editor_fecha(iid, col, x, y, ancho, alto)
+        elif col == "ren":
+            self._editor = self._editor_renovable(iid, x, y, ancho, alto)
+        elif col in CAMPOS_FECHA:
+            self._editor = self._editor_fecha(iid, col, x, y, ancho, alto)
 
     def _editor_comercializadora(self, iid, x, y, ancho, alto):
-        com, nombre = self.filas_archivo[iid]
+        oferta = self._oferta_de_fila(iid)
+        com = oferta.comercializadora
         var = ctk.StringVar(value=com)
         combo = ctk.CTkComboBox(self.tree, width=max(ancho, 210), height=max(alto - 4, 24),
                                 variable=var, values=COMERCIALIZADORAS,
@@ -1116,16 +1191,16 @@ class OfertasView(ctk.CTk):
         combo.bind("<Escape>", lambda _e: self._cerrar_editor(False))
         combo.bind("<FocusOut>", lambda _e: self.after(80, self._cerrar_editor, True))
         combo.focus_set()
-        return {"tipo": "com", "iid": iid, "col": "com", "widget": combo, "var": var,
-                "com_origen": com, "nombre": nombre}
+        return {"tipo": "com", "iid": iid, "col": "com", "widgets": [combo], "var": var,
+                "com_origen": com}
 
     def _editor_renovable(self, iid, x, y, ancho, alto):
-        com = self.filas_grupo[iid]
-        var = ctk.StringVar(value=self.grupos[com]["renovable"])
+        oferta = self._oferta_de_fila(iid)
+        var = ctk.StringVar(value=oferta.renovable)
 
-        def al_cambiar(valor):
-            self.grupos[com]["renovable"] = valor
+        def al_cambiar(valor=None):
             self._descartar_editor()
+            self._oferta_de_fila(iid).renovable = _normalizar_renovable(valor or var.get())
             self._reconstruir()
 
         menu = ctk.CTkOptionMenu(self.tree, width=max(ancho, 90), height=max(alto - 4, 24),
@@ -1134,38 +1209,226 @@ class OfertasView(ctk.CTk):
                                  corner_radius=6)
         menu.place(x=x, y=y)
         menu.bind("<Escape>", lambda _e: self._cerrar_editor(False))
-        return {"tipo": "ren", "iid": iid, "col": "ren", "widget": menu}
+        return {"tipo": "ren", "iid": iid, "col": "ren", "widgets": [menu]}
+
+    # -- editor de fecha ----------------------------------------------------
 
     def _editor_fecha(self, iid, col, x, y, ancho, alto):
-        com = self.filas_grupo[iid]
-        campo = CAMPOS_FECHA[col]
-        fecha = self.grupos[com][campo]
+        """Campo de texto para escribir o pegar la fecha + boton de calendario."""
+        oferta = self._oferta_de_fila(iid)
+        fecha = getattr(oferta, CAMPOS_FECHA[col])
+        alto_editor = max(alto - 4, 24)
+        ancho_texto = max(ancho - 32, 56)
+        var = ctk.StringVar(value=_fmt_fecha(fecha))
 
-        def al_confirmar(elegida):
-            self._descartar_editor()
-            if com in self.grupos:
-                self.grupos[com][campo] = elegida
+        entrada = ctk.CTkEntry(self.tree, textvariable=var, width=ancho_texto,
+                               height=alto_editor, font=(self.familia, 12),
+                               border_width=1, justify="center")
+        entrada.place(x=x, y=y)
+
+        boton = ctk.CTkButton(self.tree, text="📅", width=28, height=alto_editor,
+                              corner_radius=6, font=(self.familia, 12), border_width=1)
+        boton.place(x=x + ancho_texto + 2, y=y)
+        # Se abre en Button-1 (no al soltar) para que no se cuele el commit
+        # que dispara el FocusOut del campo de texto.
+        boton.bind("<Button-1>",
+                   lambda _e: self._abrir_calendario(iid, col, var.get()), add="+")
+
+        entrada.bind("<Return>", lambda _e: (self._confirmar_fecha(iid, col, var.get()), "break")[1])
+        entrada.bind("<KP_Enter>", lambda _e: (self._confirmar_fecha(iid, col, var.get()), "break")[1])
+        entrada.bind("<Tab>", lambda _e: (self._confirmar_fecha(iid, col, var.get(), 1), "break")[1])
+        entrada.bind("<Shift-Tab>", lambda _e: (self._confirmar_fecha(iid, col, var.get(), -1), "break")[1])
+        entrada.bind("<Escape>", lambda _e: (self._descartar_editor(), "break")[1])
+        entrada.bind("<FocusOut>",
+                     lambda _e: self.after(80, self._confirmar_fecha_solo, iid, col, var))
+        entrada.select_range(0, "end")
+        entrada.focus_set()
+        return {"tipo": "fecha", "iid": iid, "col": col, "widgets": [entrada, boton],
+                "entrada": entrada, "boton": boton, "var": var}
+
+    def _confirmar_fecha_solo(self, iid, col, var):
+        """Confirmacion al perder el foco, si el editor sigue siendo este."""
+        editor = self._editor
+        if editor and editor.get("tipo") == "fecha" and editor.get("iid") == iid \
+                and editor.get("col") == col:
+            self._confirmar_fecha(iid, col, var.get())
+
+    def _confirmar_fecha(self, iid, col, texto, mover=0):
+        """Aplica lo escrito/pegado. `mover` salta a la fila siguiente (-1 anterior)."""
+        oferta = self._oferta_de_fila(iid)
+        nombre = oferta.nombre if oferta else iid
+        fecha, error = _parsear_fecha(texto)
+        self._descartar_editor()
+        if error:
+            self._aviso(f"{nombre} · {COLUMNAS[col]}: {error}\n", "warn")
             self._reconstruir()
-
-        boton = ctk.CTkButton(self.tree, text=_fmt_fecha(fecha), width=max(ancho, 96),
-                              height=max(alto - 4, 24), corner_radius=6, anchor="w",
-                              font=(self.familia, 12), border_width=1,
-                              command=lambda: SelectorFecha(self, COLUMNAS[col], fecha, al_confirmar))
-        boton.place(x=x, y=y)
-        return {"tipo": "fecha", "iid": iid, "col": col, "widget": boton}
-
-    def _mover_archivo(self, nombre, com_origen, com_nueva):
-        origen = self.grupos.get(com_origen)
-        if origen is None or com_nueva == com_origen:
             return
-        oferta = next((o for o in origen["archivos"] if o.nombre == nombre), None)
+        if oferta is not None:
+            setattr(oferta, CAMPOS_FECHA[col], fecha)
+        self._reconstruir()
+        if mover:
+            self._abrir_editor(self._fila_movida(iid, mover), col)
+
+    def _fila_movida(self, iid, mover):
+        filas = self.tree.get_children("")
+        try:
+            pos = filas.index(iid) + mover
+        except ValueError:
+            return None
+        return filas[pos] if 0 <= pos < len(filas) else None
+
+    def _abrir_calendario(self, iid, col, texto):
+        """Abre el calendario partiendo de lo que haya escrito en el campo."""
+        inicial, error = _parsear_fecha(texto)
+        if error:
+            inicial = getattr(self._oferta_de_fila(iid), CAMPOS_FECHA[col], None)
+        editor = self._editor
+        self.after(0, self._descartar_si_mismo, editor)
+        SelectorFecha(self, COLUMNAS[col], inicial,
+                      lambda elegida: self._aplicar_fecha(iid, col, elegida))
+
+    def _descartar_si_mismo(self, editor):
+        if self._editor is editor:
+            self._descartar_editor()
+
+    def _aplicar_fecha(self, iid, col, fecha):
+        self._descartar_editor()
+        oferta = self._oferta_de_fila(iid)
+        if oferta is not None:
+            setattr(oferta, CAMPOS_FECHA[col], fecha)
+        self._reconstruir()
+
+    # -- copiar y pegar ----------------------------------------------------
+
+    def _copiar_fila(self):
+        """Ctrl+C: la fila enfocada al portapapeles, como TSV (sirve con Excel)."""
+        oferta = self._oferta_de_fila(self._fila_activa())
         if oferta is None:
             return
-        origen["archivos"] = [o for o in origen["archivos"] if o.nombre != nombre]
-        if not origen["archivos"]:
-            del self.grupos[com_origen]
-        self._asegurar_grupo(com_nueva)["archivos"].append(oferta)
-        self._aviso(f"{nombre}: comercializadora cambiada a {com_nueva}\n")
+        self._portapapeles = self._campos_de(oferta)
+        texto = "\t".join(self._portapapeles)
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(texto)
+        except tk.TclError:
+            pass
+        self._aviso(f"Copiado: {texto}\n")
+
+    def _pegar_en_fila(self):
+        """Ctrl+V: aplica en la fila enfocada lo copiado o lo que haya en el portapapeles."""
+        destino = self._oferta_de_fila(self._fila_activa())
+        if destino is None:
+            return
+        campos = self._campos_para_pegar()
+        if not campos:
+            self._aviso("El portapapeles está vacío\n", "warn")
+            return
+        cambios = self._aplicar_campos(destino, campos)
+        self._reconstruir()
+        self._avisar_repetidas()
+        self._aviso(f"{destino.nombre}: {', '.join(cambios) if cambios else 'sin cambios'}\n")
+
+    def _campos_para_pegar(self):
+        """Lo que se pega: la ultima copia de la app o el portapapeles del sistema."""
+        if self._portapapeles:
+            return list(self._portapapeles)
+        try:
+            return self._campos_de_texto(self.clipboard_get())
+        except tk.TclError:
+            return []
+
+    @staticmethod
+    def _campos_de_texto(texto):
+        """Trocea un texto pegado (TSV de Excel, CSV o una sola fecha)."""
+        if not texto:
+            return []
+        primera = str(texto).replace("\r\n", "\n").replace("\r", "\n").split("\n")[0]
+        if "\t" in primera:
+            partes = primera.split("\t")
+        elif ";" in primera:
+            partes = primera.split(";")
+        else:
+            partes = [primera]
+        return [p.strip().strip('"').strip() for p in partes][:5]
+
+    @staticmethod
+    def _campos_de(oferta):
+        return [oferta.comercializadora or "", oferta.renovable or "",
+                _fmt_fecha(oferta.recibida), _fmt_fecha(oferta.vencimiento),
+                _fmt_fecha(oferta.validez)]
+
+    def _aplicar_campos(self, destino, campos):
+        """Aplica los campos pegados segun cuantos y de que tipo sean."""
+        fechas = [(_parsear_fecha(campo)[0] is not None or not campo)
+                  for campo in campos]
+        cambios = []
+        if len(campos) >= 5:
+            destino.comercializadora = campos[0].upper()
+            destino.renovable = _normalizar_renovable(campos[1])
+            cambios += ["comercializadora", "renovable"]
+            for col, campo in zip(COLUMNAS_FECHA, campos[2:5]):
+                self._poner_fecha(destino, col, campo, cambios)
+        elif len(campos) == 3 and all(fechas):
+            for col, campo in zip(COLUMNAS_FECHA, campos):
+                self._poner_fecha(destino, col, campo, cambios)
+        elif len(campos) == 1 and (fechas[0] or campos[0]):
+            col = self._col_enfoque if self._col_enfoque in CAMPOS_FECHA else "ven"
+            self._poner_fecha(destino, col, campos[0], cambios)
+        return cambios
+
+    @staticmethod
+    def _poner_fecha(oferta, col, texto, cambios):
+        fecha, error = _parsear_fecha(texto)
+        if error:
+            return
+        setattr(oferta, CAMPOS_FECHA[col], fecha)
+        cambios.append(COLUMNAS[col].lower())
+
+    # -- comercializadoras repetidas -----------------------------------------
+
+    def _com_repetidas(self, solo_seleccionadas=False):
+        """{comercializadora: [archivos]} de las que se repiten.
+
+        El Excel final tiene una sola fila por comercializadora, asi que dos
+        archivos de la misma no pueden llevar fechas distintas."""
+        cuentas = {}
+        for oferta in self.ofertas.values():
+            if solo_seleccionadas and not oferta.seleccionada:
+                continue
+            com = (oferta.comercializadora or "").upper()
+            if com:
+                cuentas.setdefault(com, []).append(oferta.nombre)
+        return {com: nombres for com, nombres in cuentas.items() if len(nombres) > 1}
+
+    def _avisar_repetidas(self):
+        """Escribe en el log las comercializadoras repetidas que aun no se han dicho."""
+        repetidas = self._com_repetidas()
+        nuevas = [com for com in repetidas if com not in self._avisadas]
+        self._avisadas = set(repetidas)
+        for com in sorted(nuevas):
+            nombres = ", ".join(sorted(repetidas[com]))
+            self._aviso(f"⚠ {len(repetidas[com])} archivos de la misma comercializadora "
+                        f"({com}): {nombres}\n"
+                        f"    En el Excel solo puede haber una fila por comercializadora: "
+                        f"cambia la comercializadora de uno de ellos.\n", "warn")
+
+    def _preguntar_repetidas(self):
+        """Al procesar: si se repite alguna comercializadora, hay que avisar."""
+        repetidas = self._com_repetidas(solo_seleccionadas=True)
+        if not repetidas:
+            return True
+        detalle = "\n".join(
+            f"  ⚠ {com}: {', '.join(sorted(nombres))}"
+            for com, nombres in sorted(repetidas.items()))
+        return messagebox.askyesno(
+            "Comercializadoras repetidas",
+            "Hay más de un archivo marcado de la misma comercializadora:\n\n"
+            f"{detalle}\n\n"
+            "En el Excel final solo puede haber una fila por comercializadora, así que "
+            "de estos archivos solo se puede guardar una fecha.\n\n"
+            "Si la comercializadora auto-detectada es incorrecta, cambia la de uno de "
+            "ellos y vuelve a intentarlo.\n\n¿Procesar de todos modos?",
+            parent=self)
 
     # -- procesado ---------------------------------------------------------
 
@@ -1184,6 +1447,8 @@ class OfertasView(ctk.CTk):
         if not seleccionadas:
             messagebox.showwarning("Sin selección",
                                    "Selecciona al menos una oferta para procesar.", parent=self)
+            return
+        if not self._preguntar_repetidas():
             return
 
         fechas_com, filename_to_com = self._recolectar()
@@ -1219,20 +1484,23 @@ class OfertasView(ctk.CTk):
         self._hilo.start()
 
     def _recolectar(self):
+        """Prepara lo que espera el backend: fechas por comercializadora y
+        comercializadora por archivo.
+
+        Cada archivo lleva sus propias fechas, pero como en el Excel solo hay
+        una fila por comercializadora, si dos archivos la comparten gana la
+        del primero por orden alfabetico (el aviso ya salio antes)."""
         fechas_com = {}
         filename_to_com = {}
-        for com, g in self.grupos.items():
-            elegidas = [o for o in g["archivos"] if o.seleccionada]
-            if not elegidas:
-                continue
-            fechas_com[com] = {
-                "Recibida": g["recibida"],
-                "Vencimiento": g["vencimiento"],
-                "Validez": g["validez"],
-                "Renovable": g["renovable"],
-            }
-            for oferta in elegidas:
-                filename_to_com[oferta.nombre] = com
+        for oferta in self._seleccion():
+            com = oferta.comercializadora.strip().upper()
+            filename_to_com[oferta.nombre] = com
+            fechas_com.setdefault(com, {
+                "Recibida": oferta.recibida,
+                "Vencimiento": oferta.vencimiento,
+                "Validez": oferta.validez,
+                "Renovable": oferta.renovable,
+            })
         return fechas_com, filename_to_com
 
     def _trabajo(self, fnames, fechas_com, filename_to_com, ofertas_dir, salida_dir):
@@ -1311,7 +1579,8 @@ class OfertasView(ctk.CTk):
         if not guardar_config(config) and not self._config_advertida:
             self._config_advertida = True
             self._aviso("No se pudo guardar config.json (¿carpeta de solo lectura?). "
-                        "Se usará la carpeta Ofertas/ por defecto.\n", "warn")
+                        "Esta sesión sigue con las carpetas y el tema de siempre, pero no "
+                        "se guardarán para el próximo arranque.\n", "warn")
 
     def cerrar(self):
         if self.procesando:
@@ -1357,4 +1626,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

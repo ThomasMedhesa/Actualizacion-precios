@@ -219,15 +219,19 @@ def create_manual():
     doc.add_paragraph(
         'Al seleccionar el directorio de ofertas, la herramienta lista automáticamente '
         'todos los archivos .xlsx encontrados (ignora archivos temporales que empiezan con ~$). '
-        'La tabla está agrupada por comercializadora: cada fila en negrita es una '
-        'comercializadora y debajo están sus archivos. Se puede hacer clic en la flecha '
-        'del grupo para plegarlo o desplegarlo.'
+        'La tabla tiene UNA FILA POR ARCHIVO de oferta: no se agrupan los archivos de la '
+        'misma comercializadora.'
     )
     doc.add_paragraph(
         'Sobre la tabla hay un cuadro de búsqueda. Escribir texto filtra al instante por '
         'nombre de archivo o de comercializadora, y al limpiarlo vuelven a mostrarse todos '
-        'los grupos (que se despliegan automáticamente mientras haya un filtro activo). '
-        'Haciendo clic en la cabecera de una columna se alterna el orden ascendente/descendente.'
+        'los archivos. Haciendo clic en la cabecera de una columna se alterna el orden '
+        'ascendente/descendente.'
+    )
+    doc.add_paragraph(
+        'Si delante de una comercializadora aparece ⚠ significa que hay otro archivo con la '
+        'misma. En el Excel final solo puede haber una fila por comercializadora, por lo que '
+        'hay que cambiar la comercializadora de uno de los archivos (ver sección 3.4).'
     )
 
     table2 = doc.add_table(rows=1, cols=3)
@@ -246,11 +250,13 @@ def create_manual():
         ('Casilla', 'Seleccionar/deseleccionar la oferta para procesar (también se '
                     'marca o desmarca haciendo clic en la celda izquierda).', 'Marcada (activa)'),
         ('Archivo', 'Nombre del archivo de oferta.', '—'),
-        ('Comercializadora', 'Comercializadora del grupo al que pertenece el archivo. '
-                            'Se auto-detecta según el nombre.', 'Auto-detectada'),
-        ('Renovable', 'Si la oferta es renovable o no. Solo se edita en la fila del grupo.', 'No'),
+        ('Comercializadora', 'Comercializadora del archivo. Se auto-detecta según el '
+                            'nombre y se puede cambiar con el desplegable. Si se repite, '
+                            'aparece precedida de ⚠.', 'Auto-detectada'),
+        ('Renovable', 'Si la oferta es renovable o no.', 'No'),
         ('Recibida', 'Fecha en que se recibió la oferta.', 'Fecha de hoy'),
-        ('Vencimiento', 'Fecha de vencimiento de la oferta.', 'Vacía'),
+        ('Vencimiento', 'Fecha de vencimiento de la oferta.', 'Fin del mismo mes del '
+                        'año siguiente (02/10/2026 → 31/10/2027)'),
         ('Validez', 'Fecha de validez de la oferta.', 'Vacía'),
     ]
     for col_name, desc, default in cols:
@@ -283,22 +289,27 @@ def create_manual():
     )
     items_34 = [
         'Casilla (primera columna): alterna entre marcada y desmarcada.',
-        'Comercializadora (fila de un archivo): abre un desplegable con la lista de '
-        'comercializadoras conocidas. Al confirmar, el archivo se mueve al grupo de la '
-        'comercializadora elegida y se crea el grupo si es nueva.',
-        'Renovable (fila del grupo): abre un desplegable con los valores "No" y "Si".',
-        'Fechas Recibida, Vencimiento y Validez (fila del grupo): abren un calendario con '
-        'los botones Aceptar, Limpiar y Cancelar, además de la navegación entre meses. '
-        '"Aceptar" aplica el día marcado, "Limpiar" deja la fecha vacía y "Cancelar" '
-        'cierra el calendario sin cambiar nada.',
+        'Comercializadora: abre un desplegable con la lista de comercializadoras conocidas. '
+        'Cada archivo tiene la suya propia; no hay grupos.',
+        'Renovable: abre un desplegable con los valores "No" y "Si".',
+        'Fechas Recibida, Vencimiento y Validez: abren una caja donde se puede escribir o '
+        'pegar la fecha (p. ej. 01/04/2027, 2027-05-31, 30.06.27). Un botón 📅 junto a la '
+        'caja abre el calendario con los botones Aceptar, Limpiar y Cancelar, además de la '
+        'navegación entre meses.',
     ]
     for item in items_34:
         p = doc.add_paragraph(style='List Bullet')
         p.add_run(item)
 
     doc.add_paragraph(
-        'Con el teclado: Intro o doble clic abre el editor de la celda enfocada, '
-        'las flechas recorren las celdas y Esc o un clic fuera cierra el editor sin cambios.'
+        'En el editor de fecha: Intro acepta lo escrito, Tab acepta y baja a la fila siguiente '
+        '(Shift+Tab a la anterior) y Esc deja la celda como estaba.'
+    )
+    doc.add_paragraph(
+        'Copiar y pegar: Ctrl+C copia la fila enfocada al portapapeles y Ctrl+V la pega en la '
+        'fila enfocada. Si el portapapeles trae las tres fechas separadas por tabulador '
+        '(por ejemplo, copiadas de Excel), se rellenan Recibida, Vencimiento y Validez a la vez. '
+        'Si solo hay una fecha, se aplica a la columna de fecha enfocada.'
     )
 
     p_note = doc.add_paragraph()
@@ -306,8 +317,10 @@ def create_manual():
     run.bold = True
     run.font.color.rgb = RGBColor(180, 0, 0)
     p_note.add_run(
-        'Las fechas y la comercializadora se asignan por comercializadora, no por archivo. '
-        'Si hay varias ofertas de la misma comercializadora, se aplicarán las mismas fechas a todas.'
+        'En el Excel final solo puede haber una fila por comercializadora. Si dos archivos '
+        'comparten comercializadora (aparece ⚠), hay que cambiar la de uno de ellos antes de '
+        'procesar; de lo contrario la herramienta lo avisará y usará la primera fila por orden '
+        'alfabético de archivo.'
     )
 
     p_note = doc.add_paragraph()
@@ -378,12 +391,16 @@ def create_manual():
         ('Ctrl + R', 'Refrescar la lista de ofertas.'),
         ('Ctrl + A', 'Seleccionar todas las ofertas.'),
         ('Ctrl + D', 'Deseleccionar todas las ofertas.'),
+        ('Ctrl + C', 'Copiar la fila enfocada al portapapeles.'),
+        ('Ctrl + V', 'Pegar en la fila enfocada (fechas, comercializadora y renovable).'),
         ('Ctrl + L', 'Limpiar el log.'),
-        ('Intro', 'Procesar; sobre una celda abre su editor.'),
+        ('Intro', 'Procesar; sobre una celda abre su editor; en el editor de fecha, confirmar.'),
+        ('Tab', 'En el editor de fecha, confirmar y saltar a la fila siguiente (Shift+Tab, '
+                'a la anterior).'),
         ('Doble clic', 'Abrir el editor de la celda; sobre la casilla, alternarla.'),
         ('Flechas', 'Recorrer filas y celdas de la tabla.'),
         ('Espacio', 'Alternar la casilla de la fila enfocada.'),
-        ('Esc', 'Cerrar el editor o el calendario sin guardar.'),
+        ('Esc', 'Cerrar el editor o el calendario sin guardar; cancelar el proceso en curso.'),
         ('F1', 'Ver esta ayuda.'),
     ]
     table3 = doc.add_table(rows=1, cols=2)
