@@ -228,12 +228,6 @@ def create_manual():
         'los archivos. Haciendo clic en la cabecera de una columna se alterna el orden '
         'ascendente/descendente.'
     )
-    doc.add_paragraph(
-        'Si delante de una comercializadora aparece ⚠ significa que hay otro archivo con la '
-        'misma. En el Excel final solo puede haber una fila por comercializadora, por lo que '
-        'hay que cambiar la comercializadora de uno de los archivos (ver sección 3.4).'
-    )
-
     table2 = doc.add_table(rows=1, cols=3)
     table2.style = 'Light Grid Accent 1'
     hdr2 = table2.rows[0].cells
@@ -251,13 +245,14 @@ def create_manual():
                     'marca o desmarca haciendo clic en la celda izquierda).', 'Marcada (activa)'),
         ('Archivo', 'Nombre del archivo de oferta.', '—'),
         ('Comercializadora', 'Comercializadora del archivo. Se auto-detecta según el '
-                            'nombre y se puede cambiar con el desplegable. Si se repite, '
-                            'aparece precedida de ⚠.', 'Auto-detectada'),
+                            'nombre y se puede cambiar con el desplegable. Puede repetirse '
+                            'en varios archivos.', 'Auto-detectada'),
         ('Renovable', 'Si la oferta es renovable o no.', 'No'),
         ('Recibida', 'Fecha en que se recibió la oferta.', 'Fecha de hoy'),
         ('Vencimiento', 'Fecha de vencimiento de la oferta.', 'Fin del mismo mes del '
                         'año siguiente (02/10/2026 → 31/10/2027)'),
-        ('Validez', 'Fecha de validez de la oferta.', 'Vacía'),
+        ('Validez', 'Fecha de validez de la oferta.', 'Viernes de esta semana '
+                    '(07/10/2026 → 09/10/2026)'),
     ]
     for col_name, desc, default in cols:
         row = table2.add_row()
@@ -317,10 +312,9 @@ def create_manual():
     run.bold = True
     run.font.color.rgb = RGBColor(180, 0, 0)
     p_note.add_run(
-        'En el Excel final solo puede haber una fila por comercializadora. Si dos archivos '
-        'comparten comercializadora (aparece ⚠), hay que cambiar la de uno de ellos antes de '
-        'procesar; de lo contrario la herramienta lo avisará y usará la primera fila por orden '
-        'alfabético de archivo.'
+        'Cada archivo de oferta se procesa de forma independiente, incluso si comparte '
+        'comercializadora con otro. En el Excel pueden aparecer varias filas con la misma '
+        'comercializadora; cada una conserva los precios y fechas de su archivo de origen.'
     )
 
     p_note = doc.add_paragraph()

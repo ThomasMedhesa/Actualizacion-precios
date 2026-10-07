@@ -16,7 +16,7 @@ import sys
 import threading
 import tkinter as tk
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 
@@ -148,16 +148,13 @@ AYUDA = """CÓMO SE USA
    para abrir el calendario. Intro confirma; Tab confirma y baja a la fila
    siguiente; Esc deja la celda como estaba.
 4. Ctrl+C copia la fila enfocada y Ctrl+V la pega en la fila enfocada.
-5. Si aparece ⚠ delante de una comercializadora es que hay otro archivo con
-   la misma. En el Excel final solo puede haber una fila por comercializadora,
-   así que hay que cambiar la comercializadora de uno de los dos.
-6. Pulsa Procesar y sigue el progreso en el panel de resultado.
+5. Pulsa Procesar y sigue el progreso en el panel de resultado.
 
 POR DEFECTO
 
 Recibida    hoy
 Vencimiento fin del mes actual del año siguiente (02/10/2026 -> 31/10/2027)
-Validez     vacía
+Validez     viernes de esta semana (07/10/2026 -> 09/10/2026)
 Renovable   No
 
 Una fecha vacía significa "no modificar": en los Excel que ya existen se deja
@@ -186,6 +183,12 @@ def _fin_de_mes_proximo(referencia=None):
     Si hoy es 02/10/2026 devuelve 31/10/2027."""
     ref = referencia or date.today()
     return date(ref.year + 1, ref.month, monthrange(ref.year + 1, ref.month)[1])
+
+
+def _viernes_de_esta_semana(referencia=None):
+    """Viernes de la semana ISO de la fecha de referencia."""
+    ref = referencia or date.today()
+    return ref + timedelta(days=4 - ref.weekday())
 
 
 def _parsear_fecha(texto):
@@ -432,9 +435,9 @@ class Oferta:
     """Un archivo .xlsx de oferta: una fila de la tabla con todos sus datos.
 
     Los valores por defecto son: Recibida hoy, Vencimiento a fin del mes
-    actual del año siguiente, Validez vacía y Renovable "No". Al recargar la
-    carpeta se reutiliza `anterior` (la Oferta previa del mismo archivo) para
-    no perder lo que el usuario haya escrito a mano."""
+    actual del año siguiente, Validez el viernes de esta semana y Renovable
+    "No". Al recargar la carpeta se reutiliza `anterior` (la Oferta previa
+    del mismo archivo) para no perder lo que el usuario haya escrito a mano."""
 
     __slots__ = ("nombre", "comercializadora", "renovable", "recibida",
                  "vencimiento", "validez", "seleccionada")
@@ -447,7 +450,8 @@ class Oferta:
                          else date.today())
         self.vencimiento = (anterior.vencimiento if anterior
                             else _fin_de_mes_proximo())
-        self.validez = anterior.validez if anterior else None
+        self.validez = (anterior.validez if anterior
+                        else _viernes_de_esta_semana())
         self.seleccionada = (anterior.seleccionada if anterior and seleccionada is None
                              else True if seleccionada is None else seleccionada)
 
@@ -474,7 +478,6 @@ class OfertasView(ctk.CTk):
         self._orden = ("archivo", False)
         self._col_enfoque = "com"    # columna del último clic (la que abre Intro)
         self._portapapeles = None    # ultima fila copiada, para pegar con Ctrl+V
-        self._avisadas = set()       # comercializadoras repetidas ya avisadas
         self._visibles = 0
         self._cola_log = queue.Queue()
         self._hilo = None
@@ -908,11 +911,7 @@ class OfertasView(ctk.CTk):
             com = (anterior.comercializadora if anterior
                    else _buscar_comercializadora(fname).upper())
             self.ofertas[fname] = Oferta(fname, com.strip().upper(), anterior)
-        # Solo se vuelve a avisar de las repetidas que no se habían visto antes.
-        self._avisadas &= set(self._com_repetidas())
-
         self._reconstruir()
-        self._avisar_repetidas()
         if encontrados:
             self._aviso(f"{len(encontrados)} archivo(s) .xlsx encontrado(s) en {directorio}\n")
         else:
@@ -931,8 +930,6 @@ class OfertasView(ctk.CTk):
 
         filtro = self._filtro.get().strip().lower()
         columna, inversa = self._orden
-        repetidas = self._com_repetidas()
-
         claves = []
         for oferta in self.ofertas.values():
             if filtro and not (filtro in oferta.nombre.lower()
@@ -946,8 +943,6 @@ class OfertasView(ctk.CTk):
         self._visibles = 0
         for indice, (_clave, oferta) in enumerate(claves):
             com = oferta.comercializadora or VACIO
-            if oferta.comercializadora.upper() in repetidas:
-                com = f"⚠ {com}"
             self.tree.insert(
                 "", "end", iid=oferta.nombre,
                 text=f"{'☑' if oferta.seleccionada else '☐'} {oferta.nombre}",
@@ -1013,15 +1008,11 @@ class OfertasView(ctk.CTk):
         total = len(self.ofertas)
         seleccionados = len(self._seleccion())
         coms = len({o.comercializadora for o in self.ofertas.values()})
-        repetidas = self._com_repetidas()
         if not total:
             texto = "No hay archivos .xlsx en la carpeta seleccionada"
         else:
             texto = (f"Mostrando {self._visibles} de {total} archivo(s) · "
                      f"{seleccionados} seleccionado(s) · {coms} comercializadora(s)")
-            if repetidas:
-                texto += (f" · ⚠ {len(repetidas)} comercializadora(s) repetida(s): "
-                          "cambia la de uno de los archivos")
         self.lbl_contador.configure(text=texto)
         self.btn_procesar.configure(text=f"Procesar {seleccionados} oferta(s)"
                                     if seleccionados else "Procesar")
@@ -1153,7 +1144,6 @@ class OfertasView(ctk.CTk):
         self._descartar_editor()
         if commit:
             self._reconstruir()
-            self._avisar_repetidas()
 
     def _abrir_editor(self, iid, col, forzar=False):
         if self._editor is not None and self._editor.get("iid") == iid and \
@@ -1325,7 +1315,6 @@ class OfertasView(ctk.CTk):
             return
         cambios = self._aplicar_campos(destino, campos)
         self._reconstruir()
-        self._avisar_repetidas()
         self._aviso(f"{destino.nombre}: {', '.join(cambios) if cambios else 'sin cambios'}\n")
 
     def _campos_para_pegar(self):
@@ -1384,52 +1373,6 @@ class OfertasView(ctk.CTk):
         setattr(oferta, CAMPOS_FECHA[col], fecha)
         cambios.append(COLUMNAS[col].lower())
 
-    # -- comercializadoras repetidas -----------------------------------------
-
-    def _com_repetidas(self, solo_seleccionadas=False):
-        """{comercializadora: [archivos]} de las que se repiten.
-
-        El Excel final tiene una sola fila por comercializadora, asi que dos
-        archivos de la misma no pueden llevar fechas distintas."""
-        cuentas = {}
-        for oferta in self.ofertas.values():
-            if solo_seleccionadas and not oferta.seleccionada:
-                continue
-            com = (oferta.comercializadora or "").upper()
-            if com:
-                cuentas.setdefault(com, []).append(oferta.nombre)
-        return {com: nombres for com, nombres in cuentas.items() if len(nombres) > 1}
-
-    def _avisar_repetidas(self):
-        """Escribe en el log las comercializadoras repetidas que aun no se han dicho."""
-        repetidas = self._com_repetidas()
-        nuevas = [com for com in repetidas if com not in self._avisadas]
-        self._avisadas = set(repetidas)
-        for com in sorted(nuevas):
-            nombres = ", ".join(sorted(repetidas[com]))
-            self._aviso(f"⚠ {len(repetidas[com])} archivos de la misma comercializadora "
-                        f"({com}): {nombres}\n"
-                        f"    En el Excel solo puede haber una fila por comercializadora: "
-                        f"cambia la comercializadora de uno de ellos.\n", "warn")
-
-    def _preguntar_repetidas(self):
-        """Al procesar: si se repite alguna comercializadora, hay que avisar."""
-        repetidas = self._com_repetidas(solo_seleccionadas=True)
-        if not repetidas:
-            return True
-        detalle = "\n".join(
-            f"  ⚠ {com}: {', '.join(sorted(nombres))}"
-            for com, nombres in sorted(repetidas.items()))
-        return messagebox.askyesno(
-            "Comercializadoras repetidas",
-            "Hay más de un archivo marcado de la misma comercializadora:\n\n"
-            f"{detalle}\n\n"
-            "En el Excel final solo puede haber una fila por comercializadora, así que "
-            "de estos archivos solo se puede guardar una fecha.\n\n"
-            "Si la comercializadora auto-detectada es incorrecta, cambia la de uno de "
-            "ellos y vuelve a intentarlo.\n\n¿Procesar de todos modos?",
-            parent=self)
-
     # -- procesado ---------------------------------------------------------
 
     def procesar(self):
@@ -1448,15 +1391,12 @@ class OfertasView(ctk.CTk):
             messagebox.showwarning("Sin selección",
                                    "Selecciona al menos una oferta para procesar.", parent=self)
             return
-        if not self._preguntar_repetidas():
-            return
-
-        fechas_com, filename_to_com = self._recolectar()
-        incompletas = [com for com, d in fechas_com.items()
+        fechas_archivo, filename_to_com = self._recolectar()
+        incompletas = [nombre for nombre, d in fechas_archivo.items()
                        if not d["Vencimiento"] or not d["Validez"]]
         salida = self.var_dir_salida.get()
         detalle = (f"Ofertas seleccionadas: {len(seleccionadas)}\n"
-                   f"Comercializadoras: {len(fechas_com)}\n"
+                   f"Comercializadoras: {len({o.comercializadora for o in seleccionadas})}\n"
                    f"Carpeta de salida: {salida}\n")
         if incompletas:
             detalle += (f"\n{incompletas[0]}"
@@ -1479,31 +1419,26 @@ class OfertasView(ctk.CTk):
         self._aviso(f"\nProcesando {len(seleccionadas)} oferta(s) hacia {salida}\n", "marca")
         self._hilo = threading.Thread(
             target=self._trabajo,
-            args=([o.nombre for o in seleccionadas], fechas_com, filename_to_com,
+            args=([o.nombre for o in seleccionadas], fechas_archivo, filename_to_com,
                   ofertas_dir, salida), daemon=True)
         self._hilo.start()
 
     def _recolectar(self):
-        """Prepara lo que espera el backend: fechas por comercializadora y
-        comercializadora por archivo.
-
-        Cada archivo lleva sus propias fechas, pero como en el Excel solo hay
-        una fila por comercializadora, si dos archivos la comparten gana la
-        del primero por orden alfabetico (el aviso ya salio antes)."""
-        fechas_com = {}
+        """Prepara las fechas por archivo y la comercializadora asignada a cada uno."""
+        fechas_archivo = {}
         filename_to_com = {}
         for oferta in self._seleccion():
             com = oferta.comercializadora.strip().upper()
             filename_to_com[oferta.nombre] = com
-            fechas_com.setdefault(com, {
+            fechas_archivo[oferta.nombre] = {
                 "Recibida": oferta.recibida,
                 "Vencimiento": oferta.vencimiento,
                 "Validez": oferta.validez,
                 "Renovable": oferta.renovable,
-            })
-        return fechas_com, filename_to_com
+            }
+        return fechas_archivo, filename_to_com
 
-    def _trabajo(self, fnames, fechas_com, filename_to_com, ofertas_dir, salida_dir):
+    def _trabajo(self, fnames, fechas_archivo, filename_to_com, ofertas_dir, salida_dir):
         import traceback
         resumen = {"mono": 0, "multi": 0, "cancelado": True, "total": len(fnames)}
         mono_dir = os.path.join(salida_dir, "MONOPUNTO")
@@ -1517,10 +1452,10 @@ class OfertasView(ctk.CTk):
             os.makedirs(multi_dir, exist_ok=True)
             if ofertas_mp:
                 proc.procesar_clientes(ofertas_mp, mono_dir, es_monopunto=True,
-                                       tipo_label="MONOPUNTO", fechas_com=fechas_com)
+                                       tipo_label="MONOPUNTO", fechas_com=fechas_archivo)
             if ofertas_mt:
                 proc.procesar_clientes(ofertas_mt, multi_dir, es_monopunto=False,
-                                       tipo_label="MULTIPUNTO", fechas_com=fechas_com)
+                                       tipo_label="MULTIPUNTO", fechas_com=fechas_archivo)
             resumen["cancelado"] = proc.hubo_cancelacion()
         except Exception as exc:
             proc.log(f"\nERROR: {exc}\n", "error")

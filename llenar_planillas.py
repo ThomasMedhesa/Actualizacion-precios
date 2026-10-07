@@ -199,14 +199,14 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
       {eff_key: {
           '_nombre': str,
           '_codigos': [str],
-          '_comercializadoras': {comercializadora: {tarifa: {'P1'..'P6','FEE','Coste'}}}
+          '_ofertas': [{'archivo', 'com', 'tarifas': {tarifa: precios}}]
       }}
     """
     if ofertas_dir is None:
         ofertas_dir = OFERTAS_DIR
     # Acumuladores globales (cruce de archivos)
     todos_clientes = {}       # prefijo -> {_nombre, _codigos: set}
-    todos_precios = defaultdict(list)  # (prefijo, comercializadora, tarifa) -> lista de dicts
+    todos_precios = defaultdict(list)  # (prefijo, archivo, tarifa) -> lista de dicts
 
     for fname in sorted(os.listdir(ofertas_dir)):
         if not fname.endswith('.xlsx'):
@@ -310,11 +310,12 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
                 }
             todos_clientes[prefijo]['_codigos'].add(codigo)
 
-            key = (prefijo, comercializadora, tarifa)
+            key = (prefijo, fname, tarifa)
             todos_precios[key].append({
                 'P1': p1, 'P2': p2, 'P3': p3, 'P4': p4, 'P5': p5, 'P6': p6,
                 'FEE': fee, 'Coste': coste,
                 'codigo': codigo,
+                'com': comercializadora,
             })
 
         n_codigos = len(rows_by_codigo)
@@ -330,26 +331,29 @@ def leer_ofertas(fnames=None, filename_to_com=None, ofertas_dir=None):
         cant = len(codigos)
         target = clientes_mp if cant == 1 else clientes_mt
 
-        # Reconstruir _comercializadoras desde todos_precios
-        coms = {}
-        for (cn, com, tarifa), entries in todos_precios.items():
+        # Cada archivo conserva su propia oferta aunque comparta comercializadora.
+        ofertas_por_archivo = {}
+        for (cn, archivo, tarifa), entries in todos_precios.items():
             if cn != cliente_norm:
                 continue
-            if com not in coms:
-                coms[com] = {}
-            # Usar el primer entry
+            oferta = ofertas_por_archivo.setdefault(archivo, {
+                'archivo': archivo,
+                'com': entries[0]['com'],
+                'tarifas': {},
+            })
             entry = entries[0]
-            if tarifa not in coms[com]:
-                coms[com][tarifa] = {
-                    'P1': entry['P1'], 'P2': entry['P2'], 'P3': entry['P3'],
-                    'P4': entry['P4'], 'P5': entry['P5'], 'P6': entry['P6'],
-                    'FEE': entry['FEE'], 'Coste': entry['Coste'],
-                }
+            oferta['tarifas'][tarifa] = {
+                'P1': entry['P1'], 'P2': entry['P2'], 'P3': entry['P3'],
+                'P4': entry['P4'], 'P5': entry['P5'], 'P6': entry['P6'],
+                'FEE': entry['FEE'], 'Coste': entry['Coste'],
+            }
 
         target[cliente_norm] = {
             '_nombre': info['_nombre'],
             '_codigos': codigos,
-            '_comercializadoras': dict(coms),
+            '_ofertas': sorted(
+                ofertas_por_archivo.values(),
+                key=lambda oferta: (oferta['com'].upper(), oferta['archivo'].lower())),
         }
 
     return clientes_mp, clientes_mt
@@ -384,12 +388,16 @@ def crear_libro_plantilla(headers):
     return wb, ws
 
 
-def _datos_para_com(com, fechas_com):
-    """Returns (recibida, vencimiento, validez, renovable) or None if com not in fechas_com.
-    None signals: don't touch columns (preserve existing)."""
+def _datos_para_com(com, fechas_com, archivo=None):
+    """Returns offer dates, preserving compatibility with maps keyed by retailer.
+
+    None signals: don't touch columns (preserve existing).
+    """
     if fechas_com is None:
         return date.today(), None, None, 'No'
-    f = fechas_com.get(com.upper())
+    f = fechas_com.get(archivo) if archivo else None
+    if f is None:
+        f = fechas_com.get(com.upper())
     if f is None:
         return None
     return (f.get('Recibida', date.today()),
@@ -398,8 +406,8 @@ def _datos_para_com(com, fechas_com):
             f.get('Renovable', 'No'))
 
 
-def _escribir_datos_com(ws, row_idx, cols, com, fechas_com):
-    datos = _datos_para_com(com, fechas_com)
+def _escribir_datos_com(ws, row_idx, cols, com, fechas_com, archivo=None):
+    datos = _datos_para_com(com, fechas_com, archivo=archivo)
     if datos is None:
         return
     recibida, vencimiento, validez, renovable = datos
@@ -437,7 +445,8 @@ def escribir_fila_fija(ws, row_idx, cols, datos, cliente=None, tarifa=None,
     if c is not None:
         ws.cell(row=row_idx, column=cols['Cliente']).value = c
     ws.cell(row=row_idx, column=cols['COMERCIALIZADORA']).value = datos['com']
-    _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com)
+    _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com,
+                        archivo=datos.get('archivo'))
     ws.cell(row=row_idx, column=cols['P1']).value = datos['P1']
     ws.cell(row=row_idx, column=cols['P2']).value = datos['P2']
     ws.cell(row=row_idx, column=cols['P3']).value = datos['P3']
@@ -459,7 +468,8 @@ def escribir_fila_indexada(ws, row_idx, cols, datos, cliente=None, tarifa=None,
     if c is not None:
         ws.cell(row=row_idx, column=cols['Cliente']).value = c
     ws.cell(row=row_idx, column=cols['COMERCIALIZADORA']).value = datos['com']
-    _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com)
+    _escribir_datos_com(ws, row_idx, cols, datos['com'], fechas_com,
+                        archivo=datos.get('archivo'))
     ws.cell(row=row_idx, column=cols['P1']).value = 0
     ws.cell(row=row_idx, column=cols['P2']).value = 0
     ws.cell(row=row_idx, column=cols['P3']).value = 0
@@ -475,19 +485,20 @@ def escribir_fila_indexada(ws, row_idx, cols, datos, cliente=None, tarifa=None,
 
 def crear_plantilla_monopunto(cliente_info, fechas_com=None):
     """Crea un Workbook nuevo para un cliente MONOPUNTO."""
-    cliente_nombre = cliente_info['_nombre']
-    codigos = cliente_info['_codigos']
-    coms_disponibles = cliente_info['_comercializadoras']
+    ofertas = cliente_info['_ofertas']
 
     wb, ws = crear_libro_plantilla(MP_HEADERS)
     row_idx = 2
 
-    for com in sorted(coms_disponibles.keys()):
-        tarifas = coms_disponibles[com]
+    for oferta in ofertas:
+        com = oferta['com']
+        tarifas = oferta['tarifas']
         tarifa = list(tarifas.keys())[0] if tarifas else ''
+        if not tarifa:
+            continue
         datos = tarifas[tarifa]
 
-        datos_con_com = dict(datos, com=com)
+        datos_con_com = dict(datos, com=com, archivo=oferta['archivo'])
         if _tiene_fijos(datos):
             escribir_fila_fija(ws, row_idx, MP, datos_con_com, fechas_com=fechas_com)
             row_idx += 1
@@ -500,20 +511,19 @@ def crear_plantilla_monopunto(cliente_info, fechas_com=None):
 
 def crear_plantilla_multipunto(cliente_info, fechas_com=None):
     """Crea un Workbook nuevo para un cliente MULTIPUNTO."""
-    cliente_nombre = cliente_info['_nombre']
-    codigos = cliente_info['_codigos']
-    coms_disponibles = cliente_info['_comercializadoras']
+    ofertas = cliente_info['_ofertas']
 
-    codigo_principal = extraer_codigo_principal(codigos)
+    codigo_principal = extraer_codigo_principal(cliente_info['_codigos'])
 
     wb, ws = crear_libro_plantilla(MT_HEADERS)
     row_idx = 2
 
-    for com in sorted(coms_disponibles.keys()):
-        tarifas = coms_disponibles[com]
+    for oferta in ofertas:
+        com = oferta['com']
+        tarifas = oferta['tarifas']
         for tarifa in sorted(tarifas.keys()):
             datos = tarifas[tarifa]
-            datos_con_com = dict(datos, com=com)
+            datos_con_com = dict(datos, com=com, archivo=oferta['archivo'])
 
             if _tiene_fijos(datos):
                 escribir_fila_fija(ws, row_idx, MT, datos_con_com,
@@ -552,10 +562,10 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
     Busca una plantilla existente para el cliente.
     Si existe: actualiza filas y agrega las que falten.
     Si no existe: la crea.
-    fechas_com: {comercializadora: {'Recibida': date, 'Vencimiento': date, 'Validez': date}}
+    fechas_com: {archivo: {'Recibida': date, 'Vencimiento': date, 'Validez': date}}
     """
     cliente_nombre = cliente_info['_nombre']
-    coms_disponibles = cliente_info['_comercializadoras']
+    ofertas = cliente_info['_ofertas']
     cols = MP if es_monopunto else MT
     headers = MP_HEADERS if es_monopunto else MT_HEADERS
 
@@ -598,7 +608,7 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
             log(f"    Plantilla existente: {os.path.basename(archivo_existente)}\n")
             wb = load_workbook(archivo_existente)
             ws = wb['Plantilla']
-            _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto, fechas_com)
+            _actualizar_plantilla(ws, cols, ofertas, cliente_info, es_monopunto, fechas_com)
             output_path = archivo_existente
         else:
             output_path = os.path.join(directorio, nom_archivo)
@@ -618,16 +628,15 @@ def actualizar_o_crear_plantilla(cliente_info, directorio, es_monopunto, fechas_
         log(f"    ERROR al guardar: {e}\n", "error")
 
 
-def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto, fechas_com=None):
+def _actualizar_plantilla(ws, cols, ofertas, cliente_info, es_monopunto, fechas_com=None):
     """
     Actualiza filas existentes y agrega las que falten.
-    fechas_com: {comercializadora: {'Recibida': date, 'Vencimiento': date, 'Validez': date, 'Renovable': 'Si'|'No'}}
-    La clave de desduplicacion es (com, tarifa, indexado, renovable).
+    Las filas repetidas se emparejan en orden para conservar una por archivo.
     """
     codigo_principal = extraer_codigo_principal(cliente_info['_codigos'])
 
     # Leer filas existentes
-    filas_existentes = {}  # (com, tarifa, indexado, renovable) -> row_idx
+    filas_existentes = defaultdict(list)  # (com, tarifa, indexado, renovable) -> row_idx
     max_row = ws.max_row
 
     for row_idx in range(2, max_row + 1):
@@ -647,53 +656,56 @@ def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto
             tv = ws.cell(row=row_idx, column=cols['Tarifa']).value
             tarifa_val = str(tv).strip() if tv else ''
 
-        filas_existentes[(com_val, tarifa_val, indexado, renovable)] = row_idx
+        filas_existentes[(com_val, tarifa_val, indexado, renovable)].append(row_idx)
 
-    def renovable_para_com(com):
+    def renovable_para_oferta(oferta):
         if fechas_com is None:
             return 'NO'
-        f = fechas_com.get(com.upper())
+        f = fechas_com.get(oferta['archivo'])
+        if f is None:
+            f = fechas_com.get(oferta['com'].upper())
         if f is None:
             return 'NO'
         return f.get('Renovable', 'No').strip().upper()
 
-    # Actualizar filas existentes y detectar que combinaciones agregar
-    combinaciones_a_agregar = []  # (com, tarifa, indexado)
+    # Actualizar cada fila una sola vez y agregar las ofertas que falten.
+    combinaciones_a_agregar = []  # (oferta, tarifa, indexado)
 
     es_mt = 'Tarifa' in cols
-    for com in sorted(coms_disponibles.keys()):
-        tarifas = coms_disponibles[com]
-        ren = renovable_para_com(com)
+    for oferta in ofertas:
+        com = oferta['com']
+        tarifas = oferta['tarifas']
+        ren = renovable_para_oferta(oferta)
         for tarifa in sorted(tarifas.keys()):
             datos = tarifas[tarifa]
-            datos_con_com = dict(datos, com=com)
+            datos_con_com = dict(datos, com=com, archivo=oferta['archivo'])
             tarifa_key = tarifa if es_mt else ''
 
             key_no = (com, tarifa_key, 'NO', ren)
-            if key_no in filas_existentes:
-                r = filas_existentes[key_no]
+            if filas_existentes[key_no]:
+                r = filas_existentes[key_no].pop(0)
                 escribir_fila_fija(ws, r, cols, datos_con_com,
                                    cliente=codigo_principal if not es_monopunto else None,
                                    tarifa=tarifa if not es_monopunto else None,
                                    fechas_com=fechas_com)
             elif _tiene_fijos(datos):
-                combinaciones_a_agregar.append((com, tarifa, 'NO'))
+                combinaciones_a_agregar.append((oferta, tarifa, 'NO'))
 
             key_si = (com, tarifa_key, 'SI', ren)
-            if key_si in filas_existentes:
-                r = filas_existentes[key_si]
+            if filas_existentes[key_si]:
+                r = filas_existentes[key_si].pop(0)
                 escribir_fila_indexada(ws, r, cols, datos_con_com,
                                        cliente=codigo_principal if not es_monopunto else None,
                                        tarifa=tarifa if not es_monopunto else None,
                                        fechas_com=fechas_com)
             elif _tiene_indexados(datos):
-                combinaciones_a_agregar.append((com, tarifa, 'SI'))
+                combinaciones_a_agregar.append((oferta, tarifa, 'SI'))
 
     # Agregar combinaciones faltantes al final
     next_row = ws.max_row + 1
-    for com, tarifa, tipo in combinaciones_a_agregar:
-        datos = coms_disponibles[com][tarifa]
-        datos_con_com = dict(datos, com=com)
+    for oferta, tarifa, tipo in combinaciones_a_agregar:
+        datos = oferta['tarifas'][tarifa]
+        datos_con_com = dict(datos, com=oferta['com'], archivo=oferta['archivo'])
 
         if tipo == 'NO':
             escribir_fila_fija(ws, next_row, cols, datos_con_com,
@@ -710,7 +722,7 @@ def _actualizar_plantilla(ws, cols, coms_disponibles, cliente_info, es_monopunto
 
 def procesar_clientes(clientes_dict, directorio, es_monopunto, tipo_label, fechas_com=None):
     """Procesa todos los clientes en clientes_dict.
-    fechas_com: {comercializadora: {'Recibida': date, 'Vencimiento': date, 'Validez': date}}
+    fechas_com: {archivo: {'Recibida': date, 'Vencimiento': date, 'Validez': date}}
     """
     log(f"\n[{tipo_label}] Procesando {len(clientes_dict)} clientes...\n")
     for cliente_norm, info in sorted(clientes_dict.items()):
@@ -718,7 +730,7 @@ def procesar_clientes(clientes_dict, directorio, es_monopunto, tipo_label, fecha
             log("  Proceso cancelado por el usuario.\n", "warn")
             return
         nom = info['_nombre']
-        coms = list(info['_comercializadoras'].keys())
+        coms = [oferta['com'] for oferta in info['_ofertas']]
         log(f"\n  Cliente: {nom}\n")
         log(f"    Comercializadoras: {coms}\n")
         actualizar_o_crear_plantilla(info, directorio, es_monopunto, fechas_com)
@@ -739,12 +751,12 @@ def main():
 
     print(f"\n--- MONOPUNTO en ofertas: {len(ofertas_mp)} ---")
     for k, v in sorted(ofertas_mp.items()):
-        coms = list(v['_comercializadoras'].keys())
+        coms = [oferta['com'] for oferta in v['_ofertas']]
         print(f"  {v['_nombre']} (codigos: {v['_codigos']}) -> {coms}")
 
     print(f"\n--- MULTIPUNTO en ofertas: {len(ofertas_mt)} ---")
     for k, v in sorted(ofertas_mt.items()):
-        coms = list(v['_comercializadoras'].keys())
+        coms = [oferta['com'] for oferta in v['_ofertas']]
         print(f"  {v['_nombre']} (codigos: {v['_codigos']}) -> {coms}")
 
     # 2. Procesar MONOPUNTO
