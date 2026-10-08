@@ -9,6 +9,7 @@ Uso: python procesar_ofertas.py
 """
 
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import queue
@@ -61,6 +62,48 @@ def activar_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def _iconos_ventana_windows(ventana, ruta):
+    """Asigna a Windows las versiones pequeña y grande del archivo ICO."""
+    if sys.platform != "win32":
+        return []
+
+    user32 = ctypes.windll.user32
+    user32.GetParent.argtypes = [wintypes.HWND]
+    user32.GetParent.restype = wintypes.HWND
+    hwnd = user32.GetParent(ventana.winfo_id())
+    if not hwnd:
+        raise ctypes.WinError()
+
+    load_image = user32.LoadImageW
+    load_image.argtypes = [
+        wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+        ctypes.c_int, ctypes.c_int, wintypes.UINT,
+    ]
+    load_image.restype = wintypes.HANDLE
+    send_message = user32.SendMessageW
+    send_message.argtypes = [
+        wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t,
+    ]
+    send_message.restype = ctypes.c_ssize_t
+    destroy_icon = user32.DestroyIcon
+    destroy_icon.argtypes = [wintypes.HANDLE]
+    destroy_icon.restype = wintypes.BOOL
+
+    iconos = []
+    try:
+        for tamano, tipo in ((16, 0), (32, 1)):
+            icono = load_image(None, ruta, 1, tamano, tamano, 0x10)
+            if not icono:
+                raise ctypes.WinError()
+            iconos.append(icono)
+            send_message(hwnd, 0x80, tipo, icono)
+    except Exception:
+        for icono in iconos:
+            destroy_icon(icono)
+        raise
+    return iconos
 
 
 BASE_DIR = obtener_base_dir()
@@ -466,6 +509,8 @@ class OfertasView(ctk.CTk):
         self.config = dict(config or {})
         self.title("Gestor de Ofertas Eléctricas")
         self.iconbitmap(ICON_PATH)
+        self._iconos_nativos = _iconos_ventana_windows(self, ICON_PATH)
+        self.bind("<Destroy>", self._liberar_iconos_nativos, add="+")
         self.minsize(960, 640)
 
         self.familia = _familia_ui(self)
@@ -1528,6 +1573,19 @@ class OfertasView(ctk.CTk):
             proc.CANCELAR.set()
         self._guardar_config()
         self.destroy()
+
+    def _liberar_iconos_nativos(self, evento):
+        if evento.widget is not self or not self._iconos_nativos:
+            return
+
+        destroy_icon = ctypes.windll.user32.DestroyIcon
+        destroy_icon.argtypes = [wintypes.HANDLE]
+        destroy_icon.restype = wintypes.BOOL
+        for icono in self._iconos_nativos:
+            if not destroy_icon(icono):
+                sys.stderr.write(
+                    f"No se pudo liberar un icono de ventana: {ctypes.WinError()}\n")
+        self._iconos_nativos.clear()
 
     def _mostrar_ayuda(self):
         ventana = ctk.CTkToplevel(self)
